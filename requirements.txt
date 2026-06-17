@@ -1,0 +1,18 @@
+# ASR (GigaAM)
+onnxruntime
+librosa
+soundfile
+numpy
+# диаризация (ModelScope 3D-Speaker) — основной путь diarize_ms.py
+torch
+torchaudio
+modelscope
+funasr
+umap-learn
+hdbscan
+addict
+datasets
+certifi
+# onnx-диаризация (sherpa-onnx) — запасной путь diarize.py
+sherpa-onnx
+# системное (brew): whisper-cpp, ffmpeg

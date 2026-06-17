@@ -1,0 +1,22 @@
+{
+  "engine_order": ["gigaam", "whisper", "rev.ai"],
+  "language": "ru",
+  "gigaam": {
+    "model": "~/Library/Application Support/com.pais.handy/models/giga-am-v3-int8/model.int8.onnx",
+    "vocab": "~/Library/Application Support/com.pais.handy/models/giga-am-v3-int8/vocab.txt",
+    "chunk_seconds": 28,
+    "diarization": false,
+    "note": "CTC-модель GigaAM v3 из Handy. Лучшее качество для русского. Спикеров не размечает."
+  },
+  "whisper": {
+    "bin": "whisper-cli",
+    "model": "~/Library/Application Support/com.pais.handy/models/whisper-medium-q4_1.bin",
+    "diarization": false,
+    "note": "whisper.cpp + модель Whisper medium из Handy. Fallback, если GigaAM не справился."
+  },
+  "rev.ai": {
+    "via": "MCP (mcp__revai__submit_and_wait)",
+    "diarization": true,
+    "note": "Последний fallback. Доступен только через MCP, вызывается ассистентом вручную, если локальные движки не дали результата. Единственный вариант с разметкой спикеров."
+  }
+}
