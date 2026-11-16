@@ -6,3 +6,11 @@ __pycache__/
 *.wav
 *.log
 .DS_Store
+
+# BB builds and private job data
+work/
+node_modules/
+bb-plugin/dist/
+*.part-*
+._*
+.venv/

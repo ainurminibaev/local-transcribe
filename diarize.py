@@ -83,6 +83,12 @@ def _split_points(y):
 
 def gigaam_tokens(y):
     """Возвращает (id2tok, BLANK, [(time_sec, token_id), ...]) по всему аудио."""
+    backend = CFG["gigaam"].get("backend", "onnx")
+    if backend == "gguf":
+        from gigaam_gguf import tokens
+        return tokens(y, _split_points(y), CFG["gigaam"], SR)
+    if backend != "onnx":
+        raise ValueError(f"Неизвестный backend GigaAM: {backend}")
     import onnxruntime as ort
     id2tok = {}
     for line in open(GIGAAM_VOCAB, encoding="utf-8").read().split("\n"):

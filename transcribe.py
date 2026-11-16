@@ -86,10 +86,17 @@ def _split_points(y):
     return segs
 
 def gigaam(wav):
-    import onnxruntime as ort
     import soundfile as sf
     y, _ = sf.read(wav, dtype="float32")
     if y.ndim > 1: y = y.mean(axis=1)
+    backend = CFG["gigaam"].get("backend", "onnx")
+    if backend == "gguf":
+        from gigaam_gguf import tokens
+        pieces, _, timed = tokens(y, _split_points(y), CFG["gigaam"], SR)
+        return "".join(pieces[index] for _, index in timed).replace("▁", " ").strip()
+    if backend != "onnx":
+        raise ValueError(f"Неизвестный backend GigaAM: {backend}")
+    import onnxruntime as ort
     id2tok = {}
     for line in open(GIGAAM_VOCAB, encoding="utf-8").read().split("\n"):
         if not line.strip(): continue
@@ -124,10 +131,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("audio")
     ap.add_argument("--out", default=None)
-    ap.add_argument("--engine", choices=["gigaam", "whisper"], default=None)
+    ap.add_argument("--engine", choices=["gigaam", "whisper"], default="gigaam")
     args = ap.parse_args()
 
-    order = [args.engine] if args.engine else CFG["engine_order"]
+    order = [args.engine]  # Альтернативный движок выбирается только явно.
     wav = to_wav(args.audio)
     text, used = "", None
     try:
@@ -146,7 +153,7 @@ def main():
         os.remove(wav)  # чистим временный wav
 
     if not used:
-        sys.stderr.write("[transcribe] локальные движки не справились -> нужен Rev.ai (MCP)\n")
+        sys.stderr.write("[transcribe] выбранный движок не справился; автоматической замены нет\n")
         sys.exit(2)
 
     if args.out:

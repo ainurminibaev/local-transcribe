@@ -1,22 +1,27 @@
 {
-  "engine_order": ["gigaam", "whisper", "rev.ai"],
+  "engine_order": [
+    "gigaam"
+  ],
   "language": "ru",
   "gigaam": {
+    "backend": "gguf",
+    "gguf_model": "~/.cache/huggingface/hub/models--handy-computer--gigaam-v3-e2e-ctc-gguf/snapshots/*/gigaam-v3-e2e-ctc-Q8_0.gguf",
     "model": "~/Library/Application Support/com.pais.handy/models/giga-am-v3-int8/model.int8.onnx",
     "vocab": "~/Library/Application Support/com.pais.handy/models/giga-am-v3-int8/vocab.txt",
     "chunk_seconds": 28,
     "diarization": false,
-    "note": "CTC-модель GigaAM v3 из Handy. Лучшее качество для русского. Спикеров не размечает."
+    "note": "GigaAM v3 E2E-CTC Q8_0 GGUF из Handy >= 0.10, transcribe.cpp. backend=onnx сохраняет поддержку старых model/vocab. Спикеры размечаются отдельной диаризацией."
   },
   "whisper": {
     "bin": "whisper-cli",
     "model": "~/Library/Application Support/com.pais.handy/models/whisper-medium-q4_1.bin",
     "diarization": false,
-    "note": "whisper.cpp + модель Whisper medium из Handy. Fallback, если GigaAM не справился."
+    "note": "Локальный альтернативный движок. Только по явному выбору пользователя: --engine whisper."
   },
   "rev.ai": {
     "via": "MCP (mcp__revai__submit_and_wait)",
     "diarization": true,
-    "note": "Последний fallback. Доступен только через MCP, вызывается ассистентом вручную, если локальные движки не дали результата. Единственный вариант с разметкой спикеров."
-  }
+    "note": "Только после явного запроса пользователя. Никогда не включать автоматически."
+  },
+  "fallback_policy": "manual-only"
 }

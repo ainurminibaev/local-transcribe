@@ -1,4 +1,6 @@
-# ASR (GigaAM)
+# ASR (GigaAM GGUF, Handy >= 0.10)
+transcribe-cpp==0.4.1
+# Совместимость со старыми моделями GigaAM ONNX
 onnxruntime
 librosa
 soundfile
@@ -16,3 +18,10 @@ certifi
 # onnx-диаризация (sherpa-onnx) — запасной путь diarize.py
 sherpa-onnx
 # системное (brew): whisper-cpp, ffmpeg
+
+# Установка моделей и PDF
+huggingface_hub
+weasyprint
+yt-dlp
+simplejson
+sortedcontainers

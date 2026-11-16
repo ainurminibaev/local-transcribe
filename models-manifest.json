@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "models": {
+    "iic/speech_campplus_speaker-diarization_common": {
+      "revision": "master",
+      "files": {
+        "configuration.json": "406f6ec313e6e359b6d8605afaa520a3180b5ac33ef2e4e90114a92e3f886dd1"
+      }
+    },
+    "damo/speech_campplus_sv_zh-cn_16k-common": {
+      "revision": "master",
+      "files": {
+        "configuration.json": "6f7acaf1e81ca121f4a3c71b6ddb66beec24350a3ef330e2c846f17829176a8f",
+        "config.yaml": "17342041bd5b22f6fd7e32f6e7a267b0bf65f018c0a721bada6547e3d28fbfc9",
+        "campplus_cn_common.bin": "3388cf5fd3493c9ac9c69851d8e7a8badcfb4f3dc631020c4961371646d5ada8"
+      }
+    },
+    "damo/speech_campplus-transformer_scl_zh-cn_16k-common": {
+      "revision": "master",
+      "files": {
+        "configuration.json": "d1aaac1fe468a9efdbde606b69ab527146a651e4a91fb10b49a051f77ae01b2f",
+        "campplus_cn_encoder.pt": "104c182d5865349a4c9a087e2adfe1b0e27f7e989e9b9ec1a9b9566b624413ef",
+        "transformer_backend.pt": "dd9fb813a66927413fce473087326ca0c66aa049bc1d4fa3064f188fcb102a97"
+      }
+    },
+    "damo/speech_fsmn_vad_zh-cn-16k-common-pytorch": {
+      "revision": "v2.0.2",
+      "files": {
+        "configuration.json": "db71666c971cb16cc7f52988a6335ac39b79a845e95155ec2cbd1cc79bfd8abf",
+        "config.yaml": "486861ca26ddb79081663b6179cb204c6bfae71c52f04aafc48a9e9d8dde1e93",
+        "model.pb": "b3be75be477f0780277f3bae0fe489f48718f585f3a6e45d7dd1fbb1a4255fc5",
+        "am.mvn": "6820fef9687708c4fc3fab2530179c8fcea6262daa25514380056cd8f6eb1754"
+      }
+    }
+  }
+}

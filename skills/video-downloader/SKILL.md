@@ -1,5 +1,5 @@
 ---
-name: youtube-downloader
+name: video-downloader
 description: Download YouTube videos with customizable quality and format options. Use this skill when the user asks to download, save, or grab YouTube videos. Supports various quality settings (best, 1080p, 720p, 480p, 360p), multiple formats (mp4, webm, mkv), and audio-only downloads as MP3.
 ---
 
@@ -15,7 +15,7 @@ The simplest way to download a video:
 python scripts/download_video.py "https://www.youtube.com/watch?v=VIDEO_ID"
 ```
 
-This downloads the video in best available quality as MP4 to `/mnt/user-data/outputs/`.
+This downloads the video in best available quality as MP4 to `./work/downloads/`.
 
 ## Options
 
@@ -84,7 +84,7 @@ python scripts/download_video.py "https://www.youtube.com/watch?v=dQw4w9WgXcQ" -
 ## How It Works
 
 The skill uses `yt-dlp`, a robust YouTube downloader that:
-- Automatically installs itself if not present
+- Uses yt-dlp installed in the selected Python environment
 - Fetches video information before downloading
 - Selects the best available streams matching your criteria
 - Merges video and audio streams when needed
@@ -92,8 +92,8 @@ The skill uses `yt-dlp`, a robust YouTube downloader that:
 
 ## Important Notes
 
-- Downloads are saved to `/mnt/user-data/outputs/` by default
+- Downloads are saved to `./work/downloads/` by default
 - Video filename is automatically generated from the video title
-- The script handles installation of yt-dlp automatically
+- Install dependencies with scripts/setup_worker.py; the downloader never changes system packages
 - Only single videos are downloaded (playlists are skipped by default)
 - Higher quality videos may take longer to download and use more disk space

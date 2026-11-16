@@ -8,21 +8,23 @@ import argparse
 import sys
 import subprocess
 import json
+from pathlib import Path
+
+YT_DLP = [sys.executable, "-m", "yt_dlp"]
 
 
 def check_yt_dlp():
-    """Check if yt-dlp is installed, install if not."""
+    """Check the selected Python environment without modifying system packages."""
     try:
-        subprocess.run(["yt-dlp", "--version"], capture_output=True, check=True)
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        print("yt-dlp not found. Installing...")
-        subprocess.run([sys.executable, "-m", "pip", "install", "--break-system-packages", "yt-dlp"], check=True)
+        subprocess.run([*YT_DLP, "--version"], capture_output=True, check=True)
+    except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+        raise RuntimeError("yt-dlp is missing; run scripts/setup_worker.py") from exc
 
 
 def get_video_info(url):
     """Get information about the video without downloading."""
     result = subprocess.run(
-        ["yt-dlp", "--dump-json", "--no-playlist", url],
+        [*YT_DLP, "--dump-json", "--no-playlist", "--", url],
         capture_output=True,
         text=True,
         check=True
@@ -30,10 +32,10 @@ def get_video_info(url):
     return json.loads(result.stdout)
 
 
-def download_video(url, output_path="/mnt/user-data/outputs", quality="best", format_type="mp4", audio_only=False):
+def download_video(url, output_path="./work/downloads", quality="best", format_type="mp4", audio_only=False):
     """
     Download a YouTube video.
-    
+
     Args:
         url: YouTube video URL
         output_path: Directory to save the video
@@ -42,10 +44,11 @@ def download_video(url, output_path="/mnt/user-data/outputs", quality="best", fo
         audio_only: Download only audio (mp3)
     """
     check_yt_dlp()
-    
+    Path(output_path).mkdir(parents=True, exist_ok=True)
+
     # Build command
-    cmd = ["yt-dlp"]
-    
+    cmd = [*YT_DLP]
+
     if audio_only:
         cmd.extend([
             "-x",  # Extract audio
@@ -62,32 +65,33 @@ def download_video(url, output_path="/mnt/user-data/outputs", quality="best", fo
             # Specific resolution (e.g., 1080p, 720p)
             height = quality.replace("p", "")
             format_string = f"bestvideo[height<={height}]+bestaudio/best[height<={height}]"
-        
+
         cmd.extend([
             "-f", format_string,
             "--merge-output-format", format_type,
         ])
-    
+
     # Output template
     cmd.extend([
         "-o", f"{output_path}/%(title)s.%(ext)s",
         "--no-playlist",  # Don't download playlists by default
     ])
-    
-    cmd.append(url)
-    
+
+    cmd.extend(["--", url])
+
     print(f"Downloading from: {url}")
     print(f"Quality: {quality}")
     print(f"Format: {'mp3 (audio only)' if audio_only else format_type}")
     print(f"Output: {output_path}\n")
-    
+
     try:
         # Get video info first
         info = get_video_info(url)
         print(f"Title: {info.get('title', 'Unknown')}")
-        print(f"Duration: {info.get('duration', 0) // 60}:{info.get('duration', 0) % 60:02d}")
+        duration = int(info.get('duration') or 0)
+        print(f"Duration: {duration // 60}:{duration % 60:02d}")
         print(f"Uploader: {info.get('uploader', 'Unknown')}\n")
-        
+
         # Download the video
         subprocess.run(cmd, check=True)
         print(f"\n✅ Download complete!")
@@ -107,8 +111,8 @@ def main():
     parser.add_argument("url", help="YouTube video URL")
     parser.add_argument(
         "-o", "--output",
-        default="/mnt/user-data/outputs",
-        help="Output directory (default: /mnt/user-data/outputs)"
+        default="./work/downloads",
+        help="Output directory (default: ./work/downloads)"
     )
     parser.add_argument(
         "-q", "--quality",
@@ -127,9 +131,9 @@ def main():
         action="store_true",
         help="Download only audio as MP3"
     )
-    
+
     args = parser.parse_args()
-    
+
     success = download_video(
         url=args.url,
         output_path=args.output,
@@ -137,7 +141,7 @@ def main():
         format_type=args.format,
         audio_only=args.audio_only
     )
-    
+
     sys.exit(0 if success else 1)
 
 
