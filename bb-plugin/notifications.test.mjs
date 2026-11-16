@@ -17,7 +17,7 @@ function setup() {
 test('completion wakes once, queues behind busy work, and survives restarted notifier',async()=>{
  const s=setup();await s.tick(1);await s.tick(2);
  await notifyJob({kv:s.kv,threads:s.threads,job:s.job,now:999999});
- assert.equal(s.attempts,1);assert.equal(s.accepted[0].mode,'queue');
+ assert.equal(s.attempts,1);assert.equal(s.accepted[0].mode,'queue-if-active');
  assert.match(s.accepted[0].input[0].text,/job-123/);
  assert.equal(s.data.get('notice:job-123:completed').queuedMessageId,'queued-1');
 });

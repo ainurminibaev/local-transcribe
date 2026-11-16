@@ -43,7 +43,7 @@ export async function notifyJob({kv,threads,job,now=Date.now()}) {
     'Не запускай цикл опроса или новую расшифровку без основания. Это служебное уведомление, подтверждать его отдельно не нужно.';
   try {
     // Queue behind a busy turn, never interrupt it. Accepted queue rows belong to BB.
-    const receipt = await threads.send({threadId:job.threadId,mode:'queue',input:[{type:'text',text}]});
+    const receipt = await threads.send({threadId:job.threadId,mode:'queue-if-active',input:[{type:'text',text}]});
     if (!receipt?.ok) throw new Error('BB did not confirm notification acceptance');
     await kv.set(key,{...notice,status:'sent',sentAt:now,delivery:receipt.delivery,
       queuedMessageId:receipt.queuedMessage?.id ?? null});
