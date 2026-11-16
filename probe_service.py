@@ -38,7 +38,7 @@ def probe():
         except Exception as exc:
             missing.append('torch import: ' + str(exc))
     return {'ready': not missing, 'device': device, 'platform': platform.system(),
-            'inputs': ['ffmpeg-audio', 'ffmpeg-video'], 'outputs': ['transcript', 'segments', 'audio', 'source'],
+            'inputs': ['ffmpeg-audio', 'ffmpeg-video'], 'outputs': ['transcript', 'segments', 'audio', 'source', 'samples'], 'supportsSpeakerCount': True,
             'modelsCached': models_cached, 'engine': 'gigaam-' + backend, 'speakers': True, 'missing': missing,
             'asrDevice': 'metal' if platform.system() == 'Darwin' and platform.machine() == 'arm64' and backend == 'gguf' else device,
             'pdfReady': bool(shutil.which('pandoc') and shutil.which('weasyprint'))}
