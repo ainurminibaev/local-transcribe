@@ -11,6 +11,19 @@ import venv
 
 ROOT = Path(__file__).resolve().parents[1]
 
+def requirements_satisfied(text=None):
+    try:
+        from importlib.metadata import version
+        from packaging.requirements import Requirement
+        for line in ((ROOT/'requirements.txt').read_text() if text is None else text).splitlines():
+            if not line.strip() or line.lstrip().startswith('#'):continue
+            requirement=Requirement(line)
+            if requirement.marker and not requirement.marker.evaluate():continue
+            installed=version(requirement.name)
+            if requirement.specifier and not requirement.specifier.contains(installed,prereleases=True):return False
+        return True
+    except Exception:return False
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--download-model', action='store_true', help='Download the public GigaAM GGUF model; no audio is uploaded')
@@ -45,15 +58,8 @@ def main():
         try:adopt=json.loads(check.stdout.splitlines()[-1]).get('ready',False)
         except (ValueError,IndexError):adopt=False
         if adopt:
-            try:
-                from importlib.metadata import version
-                from packaging.requirements import Requirement
-                for line in (ROOT/'requirements.txt').read_text().splitlines():
-                    if not line.strip() or line.lstrip().startswith('#'):continue
-                    requirement=Requirement(line)
-                    if requirement.marker and not requirement.marker.evaluate():continue
-                    if requirement.specifier and not requirement.specifier.contains(version(requirement.name),prereleases=True):adopt=False
-            except Exception:adopt=False
+            check=subprocess.run([str(python),'-c','from scripts.setup_worker import requirements_satisfied; import sys; sys.exit(0 if requirements_satisfied() else 1)'],cwd=ROOT,capture_output=True,text=True)
+            adopt=check.returncode==0
         if adopt:plan=[command for command in plan if command[1:4]!=['-m','pip','install']]
     for command in plan: subprocess.run(command,check=True,cwd=ROOT)
     result=subprocess.run([str(python),str(ROOT/'probe_service.py')],cwd=ROOT,capture_output=True,text=True,check=True)
