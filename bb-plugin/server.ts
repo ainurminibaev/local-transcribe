@@ -39,7 +39,9 @@ export default function plugin(bb) {
         const probe = await host.call('probe', { repoPath: runtime.runtimePath, python: runtime.managedPython ?? 'auto', ...(source ? {legacySourcePath:source.path} : {}) }, { hostId: machine.id });
         const setup = await kv.get('setup:'+machine.id+':'+runtime.requirementsHash);
         return { ...base, ...runtime, ...probe, sourcePath:source?.path ?? null, repoPath:runtime.runtimePath,
-          environmentManaged:!!runtime.managedPython,setupStatus:runtime.managedPython?'ready':(setup?.status ?? 'pending') };
+          ready:!!runtime.managedPython && probe.ready,
+          missing:runtime.managedPython?probe.missing:[...(probe.missing ?? []),'Preparing the matching managed Python environment'],
+          setupTerminalId:setup?.terminalId ?? null,environmentManaged:!!runtime.managedPython,setupStatus:runtime.managedPython?'ready':(setup?.status ?? 'pending') };
       } catch (error) { return { ...base, missing: [String(error)] }; }
     }));
   }
@@ -109,17 +111,22 @@ export default function plugin(bb) {
     const list = await services();
     const ordered = candidates(list, job.input.service, job.input.fallback, job.selfHostId);
     const tried = new Set(job.attempts.map(a => a.hostId));
-    let service;
+    let service;let pendingWorker=false;
     for (const id of ordered) {
       if (tried.has(id)) continue;
       const found = list.find(s => s.hostId === id);
       if (found?.ready) { service = found; break; }
+      if(found?.needsSetup && found.connected && !['failed','unknown'].includes(found.setupStatus)){pendingWorker=true;continue;}
       job.attempts.push({ hostId: id, error: (found?.missing ?? ['Unknown service']).join('; '), at: Date.now() });
+    }
+    if (!service && pendingWorker) {
+      job.workerRetryAt=Date.now()+5000;job.waitingForWorker=true;await save(job);return;
     }
     if (!service) {
       job.state = 'failed'; job.error = 'No ready service in the requested primary/fallback policy';
       await save(job); return;
     }
+    delete job.workerRetryAt;delete job.waitingForWorker;
     job.state = 'preparing'; job.serviceHostId = service.hostId;
     job.workPath = (service.workRoot ?? service.repoPath + '/work') + '/' + job.id + '/' + job.attempts.length;
     job.runtimeVersion = service.runtimeVersion ?? 'legacy'; job.runtimePath = service.repoPath; job.runtimeSha256 = service.runtimeSha256 ?? null; job.python = service.python;
@@ -320,6 +327,7 @@ export default function plugin(bb) {
         const keys = await kv.list('job:');
         const jobs = (await Promise.all(keys.map(k => kv.get(k))))
           .filter(j => ['queued','preparing','starting','running','returning'].includes(j.state))
+          .filter(j => !j.workerRetryAt || Date.now() >= j.workerRetryAt)
           .filter(j => j.state !== 'returning' || !j.deliveryRetryAt || Date.now() >= j.deliveryRetryAt)
           .sort((a,b) => Number(a.state === 'queued') - Number(b.state === 'queued') || a.createdAt - b.createdAt);
         if (jobs.length && !signal.aborted) await tick(jobs[0]);

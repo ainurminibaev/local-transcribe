@@ -7,6 +7,12 @@ description: Расшифровать аудио/видео или запись 
 
 При проблемах связи прочитай `references/reliability.md`, для проверки голосов — `references/diarization.md`. Сначала прочитай `references/workflow.md` для содержания результата. PDF собирай только через `templates/md2pdf.sh` этого навыка.
 
+## Управляемые исполнители BB
+
+Код и вспомогательные скрипты доставляются host-пакетом BB, а не через git pull рабочих машин. В `services` проверяй `runtimeVersion`, `environmentManaged` и `setupStatus`; `submit` сам фиксирует версию для задачи. Каталоги runtime не редактируй и не используй как Git checkout.
+
+При `setupStatus: pending/installing` дождись подготовки окружения; задача может оставаться queued. Ошибку установки смотри по `setupTerminalId`, не ставь пакеты в глобальный Python. Для скачивания используй Python из `services.python` на том же исполнителе и скрипт `<runtimePath>/skills/video-downloader/scripts/download_video.py`. PDF-шаблоны доступны в `<runtimePath>/templates/`; исходный Git checkout для обработки не нужен.
+
 ## Сервис и политика вызова
 
 1. Вызови `local_transcribe_services`. Он возвращает машины с готовностью, устройством `mps/cuda/cpu`, зависимостями и занятостью. Mac — основной по умолчанию. `self` означает машину текущего треда. Не объявляй сервис готовым только по статусу connected.

@@ -26,3 +26,13 @@ test('runtime payload rejects tampering and escaping file names',()=>{
  assert.throws(()=>verifyBundle(payload),/checksum/);
  const escaped=bundle('0.2.0','old');escaped.files['../escape']='eA==';assert.throws(()=>verifyBundle(escaped),/path/);
 });
+
+test('published payload materializes its real Python and Unicode helper resources',async()=>{
+ const root=await mkdtemp(join(tmpdir(),'worker-real-payload-'));
+ try {
+  const value=await materializeRuntime(root);
+  assert.ok((await readFile(join(value.runtimePath,'run_service.py'),'utf8')).includes('Signal processing worker'));
+  assert.ok((await readFile(join(value.runtimePath,'templates/итоги.css'),'utf8')).length>100);
+  assert.ok((await readFile(join(value.runtimePath,'skills/video-downloader/scripts/download_video.py'),'utf8')).includes('yt_dlp'));
+ } finally {await rm(root,{recursive:true,force:true});}
+});
