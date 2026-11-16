@@ -18,7 +18,7 @@ export const submitSchema = z.object({
   inputHostId: z.string().optional(), inputPath: path,
   outputHostId: z.string().optional(), outputPath: path,
   service: z.string().default('mac'), fallback: z.array(z.string()).max(8).optional(),
-  threadId: z.string().optional(), speakers: z.boolean().default(true),
+  threadId: z.string().optional(), notify: z.boolean().default(true), speakers: z.boolean().default(true),
   engine: z.enum(['gigaam', 'whisper']).default('gigaam'),
   speakerCount: z.number().int().min(1).max(32).optional(),
   outputs: z.object({ segments: path.optional(), audio: path.optional(), source: path.optional(), samples: path.optional() }).strict().optional(),

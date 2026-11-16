@@ -165,3 +165,11 @@ test('new jobs wait for a matching managed environment instead of using a legacy
   await until(async()=>(await s.rpc.status({jobId:r.jobId})).state==='completed');assert.equal(s.launches.length,1);
  } finally {ctrl.abort();await running;}
 });
+
+test('submit tells the caller to end its turn; status remains available on demand',async()=>{
+ const s=setup();const result=await s.rpc.submit(input);assert.equal(result.wait.mode,'notification');
+ assert.equal(result.wait.threadId,'caller');const job=await s.rpc.status({jobId:result.jobId});
+ assert.equal(job.notifyOnFinish,true);assert.equal(job.state,'queued');
+ const manual=await s.rpc.submit({...input,notify:false});assert.equal(manual.wait.mode,'manual');
+ assert.equal((await s.rpc.status({jobId:manual.jobId})).notifyOnFinish,false);
+});

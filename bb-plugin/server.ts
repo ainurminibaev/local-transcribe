@@ -3,6 +3,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { z } from 'zod';
 import { hostContract, rpcContract, submitSchema } from './contract.js';
 import { candidates } from './policy.js';
+import { notifyJob, terminalStates } from './notifications.js';
 
 export default function plugin(bb) {
   const settings = bb.settings.define({
@@ -91,15 +92,16 @@ export default function plugin(bb) {
     if (input.speakerCount && !input.speakers) throw new Error('speakerCount requires speakers=true');
     if (input.speakers && input.engine === 'whisper') throw new Error('Whisper endpoint does not provide speaker labels; set speakers=false explicitly');
     const job = { id: randomUUID(), state: 'queued', createdAt: Date.now(), attempts: [],
-      input: { ...input, inputHostId, outputHostId, fallback }, selfHostId, threadId: threadId ?? null };
+      input: { ...input, inputHostId, outputHostId, fallback }, selfHostId, threadId: threadId ?? null, notifyOnFinish: !!threadId && input.notify !== false };
     if(migrationPaused)throw new Error('Plugin migration in progress; retry after update');
     await save(job);
-    return { jobId: job.id, state: job.state, primary: input.service, fallback };
+    return { jobId: job.id, state: job.state, primary: input.service, fallback,
+      wait: job.notifyOnFinish ? {mode:'notification',threadId,instruction:'Заверши ход. Сервис уведомит по завершении или ошибке. Статус проверяй один раз по запросу пользователя; не опрашивай в цикле.'} : {mode:'manual',instruction:'Автоуведомление выключено; статус доступен по jobId.'} };
   }
   async function status({ jobId }) {
     const job = await kv.get('job:' + jobId);
     if (!job) throw new Error('Unknown transcription job');
-    return job;
+    return {...job, completionNotification: await kv.get('notice:'+job.id+':'+job.state) ?? null};
   }
   async function failAttempt(job, error) {
     job.attempts.push({ hostId: job.serviceHostId ?? null, terminalId: job.terminalId ?? null, workPath: job.workPath ?? null, error: String(error), at: Date.now() });
@@ -305,8 +307,8 @@ export default function plugin(bb) {
     ['local_transcribe_retry_delivery', 'Retry delivery of existing completed artifacts after a temporary connection problem. Never repeats recognition.', z.object({ jobId: z.string() }).strict(), retryDelivery],
     ['local_transcribe_cancel', 'Cancel a transcription job without starting a fallback service.', z.object({ jobId: z.string() }).strict(), cancel],
     ['local_transcribe_services', 'List enrolled machines and their transcription service readiness, device, missing dependencies and busy state.', z.object({}).strict(), () => services()],
-    ['local_transcribe_submit', 'Queue local transcription. Prefer Mac; specify fallback host IDs, self or available for automatic fallback. Returns jobId; poll status. No cloud service is selected implicitly.', submitSchema, submit],
-    ['local_transcribe_status', 'Read transcription job progress and result. A waiting/disconnected terminal does not start another job.', z.object({ jobId: z.string() }).strict(), status],
+    ['local_transcribe_submit', 'Queue local transcription. Prefer Mac; specify fallback host IDs, self or available for automatic fallback. Returns jobId and wait instructions. End your turn; the service notifies the source thread once on completion/error. Check status once when the user asks, never poll in a loop. No cloud service is selected implicitly.', submitSchema, submit],
+    ['local_transcribe_status', 'Read progress/result once on user request or completion notification. Never loop while waiting; end the turn and wait for the service notification. A disconnected terminal does not start another job.', z.object({ jobId: z.string() }).strict(), status],
     ['local_transcribe_copy', 'Copy a file between enrolled machines in bounded chunks with SHA-256 verification and without replacing an existing file.', rpcContract.copy.input, copy],
   ];
   for (const [name, description, parameters, execute] of tools) {
@@ -314,7 +316,21 @@ export default function plugin(bb) {
       return JSON.stringify(await execute(input, context));
     } });
   }
-  bb.agents.contributeInstructions(() => 'Для расшифровки записи и итогов встречи используй навык local-transcribe и local_transcribe_services. Основной исполнитель по умолчанию Mac; по умолчанию запасные — self, затем available: текущая машина и остальные готовые сервисы. Вызов может переопределить fallback. Используй только готовые сервисы. Не отправляй запись в облачный ASR без выбранного пользователем сервиса.');
+  bb.agents.contributeInstructions(() => 'Для расшифровки записи и итогов встречи используй навык local-transcribe и local_transcribe_services. Основной исполнитель по умолчанию Mac; по умолчанию запасные — self, затем available: текущая машина и остальные готовые сервисы. Вызов может переопределить fallback. Используй только готовые сервисы. После submit сохрани jobId и заверши ход: сервис сам уведомит исходный тред о результате/ошибке. По вопросу пользователя можно проверить status один раз; не запускай циклы опроса и сообщения «ещё работает». Не отправляй запись в облачный ASR без выбранного пользователем сервиса.');
+  bb.background.service('completion-notifications', {async start(signal) {
+    while (!signal.aborted) {
+      try {
+        const jobs = await Promise.all((await kv.list('job:')).map(key=>kv.get(key)));
+        for (const job of jobs) {
+          if (signal.aborted) break;
+          if (!job?.notifyOnFinish || !terminalStates.has(job.state)) continue;
+          try {await notifyJob({kv,threads:bb.sdk.threads,job});}
+          catch(error) {bb.log.warn('Transcription notification: '+String(error));}
+        }
+      } catch(error) {bb.log.warn(String(error));}
+      try {await delay(3000,undefined,{signal});} catch {break;}
+    }
+  }});
   bb.background.service('worker-environments',{async start(signal) {
     while(!signal.aborted) {
       try {if((await settings.get()).autoSetup)await prepareWorkers();}catch(error){bb.log.warn(String(error));}

@@ -1,6 +1,6 @@
 {
   "name": "bb-plugin-local-transcribe",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "private": true,
   "type": "module",
   "bb": {
@@ -27,6 +27,6 @@
   },
   "scripts": {
     "build": "bb plugin build .",
-    "test": "node --test policy.test.mjs service.test.mjs host.test.mjs runtime.test.mjs"
+    "test": "node --test policy.test.mjs service.test.mjs host.test.mjs runtime.test.mjs notifications.test.mjs"
   }
 }
