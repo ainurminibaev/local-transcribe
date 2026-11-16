@@ -1,0 +1,6 @@
+{
+  "$schema": "https://getbb.app/schemas/plugins.schema.json",
+  "schemaVersion": 1,
+  "name": "local-transcribe",
+  "plugins": [{ "name": "local-transcribe", "source": "./bb-plugin" }]
+}

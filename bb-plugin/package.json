@@ -1,11 +1,11 @@
 {
   "name": "bb-plugin-local-transcribe",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "bb": {
     "name": "Local Transcribe",
-    "description": "Обработка записей на доступных машинах: GPU Mac по умолчанию, обнаружение сервисов и запасные исполнители по политике вызова.",
+    "description": "Локальная расшифровка записей со спикерами на Mac/GPU и резервных машинах; движок доставляется обновлением BB.",
     "branding": {
       "icon": "Mic"
     },
@@ -27,6 +27,6 @@
   },
   "scripts": {
     "build": "bb plugin build .",
-    "test": "node --test policy.test.mjs service.test.mjs host.test.mjs"
+    "test": "node --test policy.test.mjs service.test.mjs host.test.mjs runtime.test.mjs"
   }
 }

@@ -1,4 +1,5 @@
 import { experimental_defineHostEntry } from '@get-bb/plugin-sdk/host';
+import { materializeRuntime } from './runtime.js';
 import { hostContract } from './contract.js';
 import { createHash } from 'node:crypto';
 import { createReadStream, constants } from 'node:fs';
@@ -21,6 +22,7 @@ async function info(path: string) {
 export default experimental_defineHostEntry({
   contract: hostContract,
   handlers: {
+    async runtime(_input,context) {return materializeRuntime(context.experimental_paths.dataDir);},
     async localCopy({ source, target }) {
       absolute(source); absolute(target);
       const before = await info(source);
@@ -44,10 +46,10 @@ export default experimental_defineHostEntry({
       await writeFile(temporary, data, { flag: 'wx', mode: 0o600 });
       await rename(temporary, path); return true;
     },
-    async probe({ repoPath, python }, context) {
+    async probe({ repoPath, python, legacySourcePath }, context) {
       try {
         if (python === 'auto') {
-          const isolated = join(repoPath, '.venv', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python');
+          const isolated = join(legacySourcePath ?? repoPath, '.venv', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python');
           python = await access(isolated).then(() => isolated, () => 'python3');
         }
         const { stdout } = await exec(python, [absolute(repoPath) + '/probe_service.py'], {
@@ -100,3 +102,5 @@ export default experimental_defineHostEntry({
     async mkdir({ path }) { await mkdir(absolute(path), { recursive: true }); return true; },
   },
 });
+
+export { materializeRuntime, verifyBundle } from "./runtime.js";

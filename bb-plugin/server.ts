@@ -7,11 +7,14 @@ import { candidates } from './policy.js';
 export default function plugin(bb) {
   const settings = bb.settings.define({
     leaseSeconds: { type: 'number', label: 'Executor lease timeout (seconds)', default: 120, experimental_schema: z.number().int().min(30).max(240) },
+    workerHosts: { type: 'string', label: 'Registered worker machine IDs (JSON array)', default: '[]' },
+    autoSetup: { type: 'boolean', label: 'Prepare managed worker environments after updates', default: true },
     projectName: { type: 'string', label: 'Service project name', default: 'local-transcribe' },
     fallback: { type: 'string', label: 'Default fallback services (JSON array; self means caller)', default: '["self","available"]' },
   });
   const host = bb.hosts.experimental_client({ contract: hostContract });
   const kv = bb.storage.kv;
+  let migrationPaused=false;
   const save = async (job) => {
     const previous = await kv.get('job:' + job.id);
     if (previous?.state === 'cancelled' && job.state !== 'cancelled') return;
@@ -20,6 +23,7 @@ export default function plugin(bb) {
   async function services() {
     const config = await settings.get();
     const [machines, projects] = await Promise.all([bb.sdk.hosts.list(), bb.sdk.projects.list()]);
+    const registered = z.array(z.string()).parse(JSON.parse(config.workerHosts));
     const project = projects.find(p => p.name === config.projectName);
     const keys = await kv.list('job:');
     const jobs = await Promise.all(keys.map(k => kv.get(k)));
@@ -28,10 +32,14 @@ export default function plugin(bb) {
       const base = { hostId: machine.id, name: machine.name, connected: machine.status === 'connected',
         repoPath: source?.path ?? null, ready: false, device: null,
         busy: jobs.some(j => j?.serviceHostId === machine.id && ['preparing','running','returning'].includes(j.state)) };
-      if (!source) return { ...base, missing: ['No project source with the local-transcribe service'] };
+      if (!source && !registered.includes(machine.id)) return { ...base, missing: ['Worker is not registered; add it to workerHosts or the project sources'] };
       if (!base.connected) return { ...base, missing: ['Machine is disconnected'] };
       try {
-        return { ...base, ...await host.call('probe', { repoPath: source.path, python: 'auto' }, { hostId: machine.id }) };
+        const runtime = await host.call('runtime', {}, { hostId: machine.id });
+        const probe = await host.call('probe', { repoPath: runtime.runtimePath, python: runtime.managedPython ?? 'auto', ...(source ? {legacySourcePath:source.path} : {}) }, { hostId: machine.id });
+        const setup = await kv.get('setup:'+machine.id+':'+runtime.requirementsHash);
+        return { ...base, ...runtime, ...probe, sourcePath:source?.path ?? null, repoPath:runtime.runtimePath,
+          environmentManaged:!!runtime.managedPython,setupStatus:runtime.managedPython?'ready':(setup?.status ?? 'pending') };
       } catch (error) { return { ...base, missing: [String(error)] }; }
     }));
   }
@@ -61,6 +69,7 @@ export default function plugin(bb) {
     return await host.call('finish', { path: partial, target: targetPath, ...info }, { hostId: targetHostId });
   }
   async function submit(raw, context = {}) {
+    if(migrationPaused)throw new Error('Plugin migration in progress; retry after the update');
     const input = submitSchema.parse(raw);
     const threadId = context.threadId ?? input.threadId;
     let selfHostId = null;
@@ -81,6 +90,7 @@ export default function plugin(bb) {
     if (input.speakers && input.engine === 'whisper') throw new Error('Whisper endpoint does not provide speaker labels; set speakers=false explicitly');
     const job = { id: randomUUID(), state: 'queued', createdAt: Date.now(), attempts: [],
       input: { ...input, inputHostId, outputHostId, fallback }, selfHostId, threadId: threadId ?? null };
+    if(migrationPaused)throw new Error('Plugin migration in progress; retry after update');
     await save(job);
     return { jobId: job.id, state: job.state, primary: input.service, fallback };
   }
@@ -111,7 +121,8 @@ export default function plugin(bb) {
       await save(job); return;
     }
     job.state = 'preparing'; job.serviceHostId = service.hostId;
-    job.workPath = service.repoPath + '/work/' + job.id + '/' + job.attempts.length;
+    job.workPath = (service.workRoot ?? service.repoPath + '/work') + '/' + job.id + '/' + job.attempts.length;
+    job.runtimeVersion = service.runtimeVersion ?? 'legacy'; job.runtimePath = service.repoPath; job.runtimeSha256 = service.runtimeSha256 ?? null; job.python = service.python;
     await save(job);
     try {
       const inputPath = job.workPath + '/recording';
@@ -234,7 +245,52 @@ export default function plugin(bb) {
     job.state = 'returning'; job.deliveryRetryAt = Date.now(); job.deliveryDeadlineAt = Date.now() + 600000;
     delete job.error; await save(job); return { jobId, state: job.state };
   }
-  bb.rpc.register(rpcContract, { services, submit, status, copy, cancel, retryDelivery }, {
+  async function prepareWorkers({force=false}={}) {
+    const list = await services();
+    for (const service of list) {
+      if (!service.connected || !service.runtimePath || !service.needsSetup || service.busy) continue;
+      const key='setup:'+service.hostId+':'+service.requirementsHash;
+      let setup=await kv.get(key);
+      if(setup?.terminalId) {
+        try {
+          const terminal=await bb.sdk.terminals.get({terminalId:setup.terminalId});
+          if(terminal.status!=='exited')continue;
+          if(!force) {setup.status='failed';setup.exitCode=terminal.exitCode;await kv.set(key,setup);continue;}
+        } catch(error) {if(!force){setup.status='unknown';setup.error=String(error);await kv.set(key,setup);continue;}}
+      }
+      const attempt=(setup?.attempt ?? 0)+1;
+      const alphabet='23456789abcdefghijkmnpqrstuvwxyz';
+      const hash=createHash('sha256').update(key+':'+attempt).digest();
+      const terminalId='term_'+[...hash.subarray(0,10)].map(b=>alphabet[b%alphabet.length]).join('');
+      setup={status:'starting',terminalId,attempt,environmentPath:service.environmentPath,runtimeVersion:service.runtimeVersion};
+      await kv.set(key,setup);
+      const argv=['python3',service.runtimePath+'/scripts/setup_worker.py','--venv',service.environmentPath,'--requirements-id',service.requirementsHash,'--download-model'];
+      if(service.platform==='linux' || service.platform==='Linux')argv.push('--cpu');
+      if(service.platform==='darwin' || service.platform==='Darwin')argv.push('--reuse-system-packages');
+      try {
+        const terminal=await bb.sdk.terminals.create({id:terminalId,scope:{kind:'host_path',hostId:service.hostId,cwd:service.runtimePath},cols:160,rows:40,title:'Local Transcribe worker setup',start:{mode:'argv',argv}});
+        setup.terminalId=terminal.id;setup.status='installing';await kv.set(key,setup);
+      } catch(error) {setup.status='unknown';setup.error=String(error);await kv.set(key,setup);}
+    }
+    return services();
+  }
+  async function migrationSnapshot() {
+    migrationPaused=true;
+    const keys=await kv.list('job:');const jobs=await Promise.all(keys.map(key=>kv.get(key)));
+    if(jobs.some(job=>['queued','preparing','starting','running','returning'].includes(job.state))){migrationPaused=false;throw new Error('Wait for active jobs before migrating');}
+    migrationPaused=true;
+    const entries=await Promise.all((await kv.list()).filter(key=>key.startsWith('job:')||key.startsWith('setup:')).map(async key=>({key,value:await kv.get(key)})));
+    return {version:1,settings:await settings.get(),entries};
+  }
+  async function migrationRestore(snapshot) {
+    for(const entry of snapshot.entries) {
+      if(!entry.key.startsWith('job:')&&!entry.key.startsWith('setup:'))throw new Error('Invalid migration key');
+      await kv.set(entry.key,entry.value);
+    }
+    await settings.experimental_set(snapshot.settings);migrationPaused=false;
+    return {restored:snapshot.entries.length};
+  }
+  bb.rpc.register(rpcContract, { migrationSnapshot, migrationRestore, services, submit, status, copy, cancel, retryDelivery, prepareWorkers }, {
     experimental_discoverable: true,
     experimental_description: 'Local transcription service discovery, queued jobs with caller-defined primary/fallback hosts, status and binary transfer.',
   });
@@ -252,6 +308,12 @@ export default function plugin(bb) {
     } });
   }
   bb.agents.contributeInstructions(() => 'Для расшифровки записи и итогов встречи используй навык local-transcribe и local_transcribe_services. Основной исполнитель по умолчанию Mac; по умолчанию запасные — self, затем available: текущая машина и остальные готовые сервисы. Вызов может переопределить fallback. Используй только готовые сервисы. Не отправляй запись в облачный ASR без выбранного пользователем сервиса.');
+  bb.background.service('worker-environments',{async start(signal) {
+    while(!signal.aborted) {
+      try {if((await settings.get()).autoSetup)await prepareWorkers();}catch(error){bb.log.warn(String(error));}
+      try {await delay(30000,undefined,{signal});}catch{break;}
+    }
+  }});
   bb.background.service('transcription-jobs', { async start(signal) {
     while (!signal.aborted) {
       try {
