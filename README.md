@@ -1,184 +1,78 @@
-# Стек локальной транскрибации со спикерами
+**English** · [Русский](README.ru.md)
 
-Полностью **локальный** конвейер: речь → текст (русский) + разметка «кто говорит».
-Без облака, **без токенов HuggingFace**. Каждый запуск — одноразовый процесс
-(загрузил модели в RAM → отработал → вышел → ОС освободила память). **Handy не
-трогаем** — только читаем её файлы моделей.
+# Local Transcribe — local speech-to-text with speakers for BB
 
-## Архитектура
+A fully **local** pipeline: speech → Russian text plus "who speaks when"
+(speaker diarization). No cloud and no HuggingFace tokens. Every run is a
+one-shot process: load the models, work, exit, and the OS frees the memory.
+It ships as a BB plugin, so agents of every project and machine can transcribe
+recordings and meetings.
+
+## How it works
 
 ```
-аудио/видео ──ffmpeg──► wav 16k mono
+audio/video ──ffmpeg──► wav 16k mono
                          │
             ┌────────────┴─────────────┐
             ▼                          ▼
-   ТЕКСТ (ASR)                 СПИКЕРЫ (диаризация)
+   TEXT (ASR)                  SPEAKERS (diarization)
    GigaAM v3 (CTC, GGUF)       ModelScope 3D-Speaker:
-   из Handy                      FSMN VAD → CAM++ эмбеддинги → кластеризация
+                                 FSMN VAD → CAM++ embeddings → clustering
             │                          │
-            └──────── склейка по таймкодам ────────►  Speaker N [mm:ss]: текст
+            └──────── merged by timestamps ────────►  Speaker N [mm:ss]: text
 ```
 
-- **Текст:** GigaAM v3 (e2e CTC) — лучшее качество для русского. Альтернативные движки используются только после явного выбора пользователя.
-- **Спикеры:** ModelScope `iic/speech_campplus_speaker-diarization_common` (PyTorch, считает на MPS / GPU Mac). Модели тянутся с ModelScope в `~/.cache/modelscope`.
+- **Text**: GigaAM v3 (end-to-end CTC), the best quality for Russian; other
+  engines only when the user picks them.
+- **Speakers**: ModelScope `iic/speech_campplus_speaker-diarization_common`
+  (PyTorch, on the Mac GPU via MPS).
+- About 4 minutes for a 40-minute recording on an Apple Silicon Mac.
 
-## Файлы в `.transcribe/`
+## In BB
 
-| Файл | Назначение |
-|---|---|
-| `diarize_ms.py` | **ГЛАВНЫЙ.** Текст (GigaAM) + спикеры (ModelScope). Дефолт для всего. |
-| `transcribe.py` | Только текст, без спикеров (быстро, ~70 с). Если разметка не нужна. |
-| `diarize.py` | GigaAM-функции + onnx-диаризация на sherpa-onnx (запасной путь без torch; качество ниже). `diarize_ms.py` переиспользует отсюда GigaAM. |
-| `config.json` | Пути к моделям Handy, порядок движков, размер чанка. |
-| `diar_models/` | onnx-модели для sherpa-варианта (pyannote-сегментация + эмбеддинги). |
+`bb-plugin/` is the BB plugin with the `local-transcribe` skill. The agent of
+the thread gets the recording (a link, an attachment or a path), the plugin runs
+recognition on a Mac with a GPU first, then on ready fallback machines by the
+call's policy, and returns the results to the requesting machine. The agent then
+writes summaries, decisions, tasks and a PDF from the project context. The ASR
+service itself never names people or assigns tasks.
 
-## Запуск
+- Tools for agents: `local_transcribe_services`, `local_transcribe_submit`,
+  `local_transcribe_status`, `local_transcribe_copy`, `local_transcribe_cancel`;
+  the same as discoverable RPC `local-transcribe` for other plugins.
+- Results on request: transcript, diarization JSON (speaker intervals and
+  timestamped lines), AAC audio, a copy of the source; each with size and SHA-256.
+- A job with a thread id wakes that thread once with the result or error.
+- Survives a sleeping Mac and retries delivery: [docs/reliability.md](docs/reliability.md);
+  known speaker count, cache and voice samples: [docs/diarization.md](docs/diarization.md).
 
-```bash
-# со спикерами (дефолт, ~4 мин на 40-мин запись)
-python3 "diarize_ms.py" "<файл>" --out "<папка>/transcript.txt"
-
-# без спикеров (быстро, ~70 с)
-python3 "transcribe.py" "<файл>" --out "<папка>/transcript.txt"
-```
-Формат вывода со спикерами: `Speaker N [mm:ss]: текст`.
-
-## Модели
-
-**GigaAM (Handy >= 0.10, читаем, не трогаем):**
-`~/.cache/huggingface/hub/models--handy-computer--gigaam-v3-e2e-ctc-gguf/snapshots/*/gigaam-v3-e2e-ctc-Q8_0.gguf`.
-
-Движок — `transcribe-cpp==0.4.1` (на Apple Silicon — Metal). Установка:
-`python3 -m pip install 'transcribe-cpp==0.4.1'`.
-Модель уже скачана Handy; скрипты не скачивают её повторно и не читают выбранную
-модель из настроек приложения. Путь или glob задаётся в `gigaam.gguf_model`
-в `config.json`; при нескольких snapshots выбирается файл с самой новой датой
-изменения (при равенстве — по пути). Для нестандартного HF-кэша укажите свой путь.
-
-`gigaam_gguf.py` возвращает токены и их таймкоды в общий код склейки со спикерами.
-Это используется в `diarize_ms.py`, `diarize.py` и `transcribe.py`.
-Для старых установок можно задать `gigaam.backend: "onnx"` и пути `model`/`vocab`:
-`~/Library/Application Support/com.pais.handy/models/giga-am-v3-int8/model.int8.onnx`
-и соседний `vocab.txt`. ONNX не умеет читать GGUF.
-
-Whisper-fallback: `~/Library/Application Support/com.pais.handy/models/whisper-medium-q4_1.bin`.
-В `transcribe.py` по умолчанию выбран GigaAM; `--engine whisper` выбирается явно. При ошибке автоматического переключения нет. Скрипты со спикерами сохраняют ту же политику.
-
-Проверки адаптера: `python3 -m unittest discover -p 'test_*.py' -v`.
-
-**Диаризация (ModelScope, подготовка через setup_worker в `~/.cache/modelscope`):**
-`iic/speech_campplus_speaker-diarization_common` (тянет за собой CAM++ SV, FSMN VAD, SCL-ресегментацию).
-
-## Старый GigaAM ONNX — точный препроцессинг
-
-Этот раздел относится только к `backend: "onnx"` (прежний `transcribe-rs`).
-Для GGUF препроцессинг и декодирование выполняет `transcribe.cpp`.
-В старом ONNX-пути критично воспроизвести 1-в-1, иначе текст — мусор:
-- вход модели: `features [1, 64, T]` + `feature_lengths`; выход: `log_probs [1, T, 257]` (CTC, blank=256).
-- мел-спектр: `n_fft=320` (FFT ровно 320, **без округления**), `hop=160`, `win=320`, **center=False**.
-- окно Ханна **периодическое**: `0.5*(1-cos(2πi/320))`.
-- мел-фильтрбанк: HTK-шкала `1127·ln(1+hz/700)`, **без slaney-нормировки**, треугольники по бинам `hz·n_fft/sr`, `f_min=0`, `f_max=8000`, 64 фильтра.
-- лог: `ln(clip(mel, 1e-9))`. **Нормализацию НЕ применять** (GigaAM её не ждёт).
-- декод: greedy CTC (argmax → схлопнуть повторы → убрать blank). vocab: `токен id`, `▁` = пробел.
-
-## Пайплайн «под ключ» — docs / templates / skills
-
-Помимо кода диаризации, репозиторий хранит полный рабочий процесс «ссылка/запись → `итоги.pdf`»:
-
-| Путь | Что это |
-|---|---|
-| `docs/транскрибация-и-итоги.md` | Полный пайп: движки и fallback, диаризация, структура итогов, сборка PDF (pandoc + weasyprint, DYLD-фикс), markdown-правила вёрстки. |
-| `docs/уборка.md` | Чистка и экономия места после задачи (удаляем видео-оригиналы при наличии аудио — только с подтверждением). |
-| `docs/разрешение-команд.md` | Готовый allow-лист для `.claude/settings.local.json`, чтобы пайплайн шёл без переспросов. Нюанс: составные команды всегда выносятся на подтверждение. |
-| `templates/итоги.css` | CSS-шаблон для сборки `итоги.pdf` (`pandoc … --pdf-engine=weasyprint -c .style.css`). |
-| `skills/video-downloader/` | Скилл скачивания YouTube (`SKILL.md` + `scripts/download_video.py`, yt-dlp). Флаг `-a` — только аудио. |
-
-## Зависимости (ставятся один раз)
-
-```bash
-brew install whisper-cpp ffmpeg pango      # ASR-fallback, конвертация, PDF
-pip3 install onnxruntime librosa soundfile numpy   # GigaAM
-pip3 install torch torchaudio modelscope funasr umap-learn hdbscan addict datasets  # диаризация
-```
-Исполнитель явно переносит speaker embeddings на MPS при наличии GPU Mac.
-
-## Заметки
-
-- **Время:** ~4 мин на 40-мин запись (диаризация ~2.5 мин + GigaAM ~70 с). Первый запуск может быть дольше из-за загрузки библиотек; модели заранее готовит setup_worker.
-- **Память:** ничего не висит; при сомнении `pgrep -fl "diarize|transcribe|whisper-server"`.
-- **Модели onnx-фолбэка** (`diar_models/`) в git не хранятся — подтянуть `python3 fetch_diar_models.py`.
-- **Handy** — отдельное приложение (github.com/cjpais/Handy); мы лишь читаем его файлы моделей, ничего не меняя.
-
-## BB: единая возможность на всех машинах
-
-`bb-plugin/` — общий плагин с навыком `local-transcribe`, доступным агентам всех проектов и машин. Он описывает получение записи, передачу на Mac, локальное распознавание и возврат результатов. Общие настройки голосового ввода BB плагин не меняет.
-
-Mac выполняет обработку аудио с GPU; агент исходного треда готовит итоги с учётом контекста проекта. Разработка и Git выполняются на Tru. При недоступности Mac или подтверждённой ошибке процесс выбирает готовый сервис из списка `fallback`, заданного вызовом. По умолчанию это `self`, затем `available` — машина исходного треда и остальные готовые сервисы; пустой список отключает переходы. Короткий разрыв связи пережидается; истечение lease прекращает прежнюю попытку и разрешает переход к следующему сервису, а старый результат не принимается.
-
-Установка на сервере BB из checkout проекта:
+## Install and update
 
 ```sh
-bb plugin build ./bb-plugin
-bb plugin install ./bb-plugin --yes
+bb plugin install 'git:https://github.com/ainurminibaev/local-transcribe.git@semver:^0.2.0' --yes
 ```
 
-Навык поставляется со своими инструкциями, PDF-шаблонами и скриптом передачи файлов. После изменения этих материалов обновить копии: `python3 scripts/sync_bb_skill.py`, затем собрать и перезагрузить плагин. Проверка синхронизации: `python3 scripts/sync_bb_skill.py --check`.
+The Python engine is part of the plugin's host package: after one update in BB
+(`bb plugin update local-transcribe`) the code reaches every registered executor
+on first use, and environments are prepared automatically. Running jobs keep
+their version; models and results are kept. Executors are set in the `workerHosts`
+setting and need Python 3.10+ and ffmpeg. The plugin is part of the
+[bb-config](https://github.com/ainurminibaev/bb-config) set. Release procedure:
+[docs/updates.md](docs/updates.md).
 
-На Mac существующая папка `Yandex Telemost` сохраняет записи и результаты. Код и актуальные инструкции находятся здесь; старые точки входа можно направить на этот репозиторий без переноса личных записей в Git.
+## Command line
 
-### API сервиса
-
-Плагин предоставляет агентам инструменты `local_transcribe_services`, `local_transcribe_submit`, `local_transcribe_status`, `local_transcribe_copy`, `local_transcribe_cancel`. Те же операции доступны другим плагинам через discoverable RPC `local-transcribe`: `services`, `submit`, `status`, `copy`, `cancel`.
-
-```json
-{
-  "inputHostId": "<host-with-recording>",
-  "inputPath": "/absolute/path/recording.webm",
-  "outputHostId": "<host-for-results>",
-  "outputPath": "/absolute/path/transcript.txt",
-  "threadId": "<caller-thread>",
-  "service": "mac",
-  "fallback": ["self"],
-  "speakers": true,
-  "engine": "gigaam"
-}
+```bash
+# with speakers (default)
+python3 diarize_ms.py "<file>" --out "<folder>/transcript.txt"
+# text only (fast, about 70 s)
+python3 transcribe.py "<file>" --out "<folder>/transcript.txt"
 ```
 
-`service` принимает `mac`, `auto`, machine ID или точное имя машины. `fallback` — упорядоченный список таких же селекторов; `available` разворачивается во все оставшиеся готовые локальные сервисы; `self` означает машину вызывающего треда, а не сервер BB. Вне треда укажите явные machine ID. `services` сообщает готовность, устройство `mps/cuda/cpu`, недостающие зависимости и занятость. Машины без source проекта или моделей показываются как неготовые. Распознавание не устанавливает зависимости автоматически.
+Output with speakers: `Speaker N [mm:ss]: text`. Model paths, engines and the
+one-time dependencies are described in [README.ru.md](README.ru.md) (Russian).
 
-Задания сохраняются в хранилище плагина, обрабатываются последовательно, имеют `jobId`, ID терминала и журнал попыток. Долгая обработка выполняется в обычном терминале BB. Перезапуск плагина не перезапускает распознавание; при неопределённом состоянии запуска сохраняется terminal ID. Если возврат результата не удался, состояние `return_failed` содержит путь к готовому транскрипту на исполнителе, и распознавание заново не запускается.
+## Checks
 
-Копирование идёт через host RPC порциями по 1 MiB с проверкой размера/SHA-256 и созданием результата без замены существующего файла. Частичные данные остаются рядом с суффиксом `.part-<uuid>` для диагностики; оригиналы не удаляются. Это частная обработка в BB; режим микрофона и настройки AI services не меняются.
-
-Самостоятельная установка на другой машине и в другом BB: [docs/deployment.md](docs/deployment.md). `bb-config` для установки не требуется.
-
-### Состав результата и роль агента
-
-ASR-сервис не пишет итоги. Он делает только распознавание, диаризацию и техническую подготовку запрошенных файлов. Агент исходного треда получает ссылку/вложение/путь, подготавливает локальный файл, выбирает исполнителей и набор результатов, затем по запросу пишет итоги, решения, задачи и PDF. Для ссылки используется video-downloader/yt-dlp; входной файл принимает ffmpeg (распространённые видео- и аудиоконтейнеры). Закрытые ссылки требуют доступного источнику способа авторизации, DRM и неподдерживаемые форматы не обходятся автоматически.
-
-`outputPath` задаёт транскрипт; дополнительные результаты запрашиваются отдельными путями:
-
-```json
-{
-  "inputPath": "/project/meeting.webm",
-  "outputPath": "/project/results/transcript.txt",
-  "outputs": {
-    "segments": "/project/results/diarization.json",
-    "audio": "/project/results/audio.m4a",
-    "source": "/project/results/meeting.webm"
-  }
-}
-```
-
-Все результаты возвращаются на `outputHostId`. Если не указать `outputs`, возвращается только текст. JSON содержит текст, длительность, речевые интервалы спикеров с началом/концом и текстовые реплики с временем начала; он не приписывает номера спикеров людям. Без диаризации JSON сообщает `speakerLabels: false`. Аудио возвращается как AAC/M4A 96 kbit/s. Исходник копируется без изменений. Поле `result.artifacts` содержит пути, размеры и SHA-256 возвращённых файлов; промежуточные материалы остаются в рабочей папке исполнителя.
-
-Примеры просьб: «только текст», «текст и аудио», «сохрани всё», «исходник, расшифровка и итоги PDF». Агент переводит их в параметры сервиса и последующую обработку. Оригинал не удаляется, даже если пользователь не запросил его копию в результате. Отмена: `local_transcribe_cancel` / RPC `cancel`.
-
-
-Устойчивость при сне Mac и восстановление доставки: [docs/reliability.md](docs/reliability.md). Известное число говорящих, кэш и проверка голосовых примеров: [docs/diarization.md](docs/diarization.md). В API доступны `speakerCount`, `outputs.samples` и `retryDelivery`; ASR по-прежнему не назначает людям имена или задачи.
-
-## Релизы и штатные обновления
-
-Для штатной установки используйте Git-релиз из корня репозитория, как описано в [docs/updates.md](docs/updates.md). Python-движок включён в host-пакет: после одного обновления BB код доставляется на зарегистрированные исполнители. Их checkout больше не является местом исполнения. Отдельные версии кода и окружений сохраняют работоспособность запущенных задач; модели и результаты не удаляются.
-
-Проверка комплектности релиза: `python3 scripts/sync_runtime.py --check` и `python3 scripts/sync_release.py --check`. После изменения Python-кода или версии обновите оба генерируемых файла до commit/tag.
+`python3 scripts/sync_runtime.py --check`, `python3 scripts/sync_release.py --check`
+and the `test_*.py` suites.
