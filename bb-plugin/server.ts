@@ -1,9 +1,18 @@
 import { randomUUID, createHash } from 'node:crypto';
+import { posix, win32 } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { z } from 'zod';
 import { hostContract, rpcContract, submitSchema } from './contract.js';
+import { normalizeVocabulary } from './vocabulary.js';
 import { candidates } from './policy.js';
+import { registerVoicePilot } from './voice-pilot.js';
 import { notifyJob, terminalStates } from './notifications.js';
+
+function within(root, entry) {
+  const path = /^(?:[a-z]:[\\/]|\\\\)/i.test(root) ? win32 : posix;
+  const delta = path.relative(root, entry);
+  return delta !== '..' && !delta.startsWith('..' + path.sep) && !path.isAbsolute(delta);
+}
 
 export default function plugin(bb) {
   const settings = bb.settings.define({
@@ -11,10 +20,14 @@ export default function plugin(bb) {
     workerHosts: { type: 'string', label: 'Registered worker machine IDs (JSON array)', default: '[]' },
     autoSetup: { type: 'boolean', label: 'Prepare managed worker environments after updates', default: true },
     projectName: { type: 'string', label: 'Service project name', default: 'local-transcribe' },
+    voicePilotProjects: { type: 'string', label: 'Private BB projects for manual voice review (JSON array)', default: '[]' },
+    voiceRegistryKey: { type: 'string', label: 'Voice registry encryption key (64 hex characters)', secret: true },
+    neutralVocabulary: { type: 'string', label: 'Shared neutral GigaAM terms (JSON array)', default: '[]' },
     fallback: { type: 'string', label: 'Default fallback services (JSON array; self means caller)', default: '["self","available"]' },
   });
   const host = bb.hosts.experimental_client({ contract: hostContract });
   const kv = bb.storage.kv;
+  registerVoicePilot(bb, {settings,host,kv});
   let migrationPaused=false;
   const save = async (job) => {
     const previous = await kv.get('job:' + job.id);
@@ -76,10 +89,16 @@ export default function plugin(bb) {
     const input = submitSchema.parse(raw);
     const threadId = context.threadId ?? input.threadId;
     let selfHostId = null;
+    let sourceEnvironmentId, sourceProjectId;
     if (threadId) {
       const detail = await bb.sdk.threads.get({ threadId });
       const envId = detail.environmentId ?? detail.thread?.environmentId;
-      if (envId) selfHostId = (await bb.sdk.environments.get({ environmentId: envId })).hostId;
+      if (envId) {
+        const environment = await bb.sdk.environments.get({ environmentId: envId });
+        selfHostId = environment.hostId;
+        sourceEnvironmentId = envId;
+        sourceProjectId = environment.projectId;
+      }
     }
     const config = await settings.get();
     const fallback = input.fallback ?? z.array(z.string()).max(8).parse(JSON.parse(config.fallback));
@@ -92,7 +111,7 @@ export default function plugin(bb) {
     if (input.speakerCount && !input.speakers) throw new Error('speakerCount requires speakers=true');
     if (input.speakers && input.engine === 'whisper') throw new Error('Whisper endpoint does not provide speaker labels; set speakers=false explicitly');
     const job = { id: randomUUID(), state: 'queued', createdAt: Date.now(), attempts: [],
-      input: { ...input, inputHostId, outputHostId, fallback }, selfHostId, threadId: threadId ?? null, notifyOnFinish: !!threadId && input.notify !== false };
+      input: { ...input, inputHostId, outputHostId, fallback }, selfHostId, sourceEnvironmentId, sourceProjectId, threadId: threadId ?? null, notifyOnFinish: !!threadId && input.notify !== false };
     if(migrationPaused)throw new Error('Plugin migration in progress; retry after update');
     await save(job);
     return { jobId: job.id, state: job.state, primary: input.service, fallback,
@@ -108,6 +127,62 @@ export default function plugin(bb) {
     delete job.leaseToken; delete job.leaseExpiresAt; delete job.lastHeartbeatAt; delete job.leasePath;
     job.state = 'queued'; job.terminalId = null; job.serviceHostId = null;
     await save(job);
+  }
+  async function workspaceRoots(hostId) {
+    const pageSize = 100;
+    const roots = [];
+    for (let offset = 0; ; offset += pageSize) {
+      const page = await bb.sdk.environments.list({hostId, status:'ready', limit:pageSize, offset});
+      roots.push(...page);
+      if (page.length < pageSize) return roots;
+    }
+  }
+  async function projectTerms(job) {
+    if (!job.sourceProjectId || !job.sourceEnvironmentId) return [];
+    const environment = await bb.sdk.environments.get({ environmentId: job.sourceEnvironmentId });
+    if (!environment.path || environment.hostId !== job.selfHostId || environment.projectId !== job.sourceProjectId) return [];
+
+    const hosts = [...new Set([environment.hostId, job.input.inputHostId])];
+    const [projects, ...workspaces] = await Promise.all([
+      bb.sdk.projects.list(), ...hosts.map(workspaceRoots),
+    ]);
+    const source = projects.find(project => project.id === job.sourceProjectId);
+    if (!source) return [];
+    const workspacePaths = workspaces.flat();
+    const foreign = [
+      ...projects.filter(project => project.id !== source.id).flatMap(project => project.sources ?? []),
+      ...workspacePaths.filter(workspace => workspace.projectId !== source.id),
+    ];
+    const ownRoots = [
+      ...(source.sources ?? []), environment, ...workspacePaths.filter(workspace => workspace.projectId === source.id),
+    ];
+    const foreignRecording = foreign.some(({hostId,path}) =>
+      hostId === job.input.inputHostId && path && within(path, job.input.inputPath) &&
+      !ownRoots.some(own => own.hostId === hostId && own.path && within(path, own.path) &&
+        !within(own.path, path) && within(own.path, job.input.inputPath)));
+    if (foreignRecording) return [];
+
+    const excludedRoots = foreign.filter(({hostId,path}) => hostId === environment.hostId &&
+      path && within(environment.path, path)).map(({path}) => path);
+    if (excludedRoots.some(path => within(path, environment.path))) return [];
+    const terms = await host.call('projectVocabulary', {
+      root: environment.path, excludedRoots,
+    }, { hostId: environment.hostId }).catch(() => []);
+    return [source.name, ...terms];
+  }
+  async function vocabularyFile(job, service) {
+    if (!service.contextVocabulary || job.input.engine !== 'gigaam') return;
+    let neutral = [];
+    try {
+      neutral = z.array(z.string()).max(64).parse(JSON.parse((await settings.get()).neutralVocabulary ?? '[]'));
+    } catch {
+      // Malformed optional shared vocabulary must not break transcription.
+    }
+    const terms = await projectTerms(job).catch(() => []);
+    const vocabulary = normalizeVocabulary([...neutral, ...terms]);
+    if (vocabulary.length) return host.call('writeVocabulary', {
+      folder: job.workPath, terms: vocabulary,
+    }, { hostId: service.hostId });
   }
   async function prepare(job) {
     const list = await services();
@@ -137,12 +212,14 @@ export default function plugin(bb) {
       const inputPath = job.workPath + '/recording';
       await copy({ sourceHostId: job.input.inputHostId, sourcePath: job.input.inputPath,
         targetHostId: service.hostId, targetPath: inputPath });
+      const vocabulary = await vocabularyFile(job, service).catch(() => undefined);
       job.leaseToken = randomUUID(); job.leasePath = job.workPath + '/.lease.json';
       job.leaseExpiresAt = Date.now() + (await settings.get()).leaseSeconds * 1000;
       await host.call('lease', { path: job.leasePath, token: job.leaseToken, expiresAt: job.leaseExpiresAt, create: true }, { hostId: service.hostId });
       job.lastHeartbeatAt = Date.now();
       const argv = [service.python ?? 'python3', service.repoPath + '/run_service.py', inputPath,
         '--out-dir', job.workPath, '--engine', job.input.engine, '--lease-file', job.leasePath, '--lease-token', job.leaseToken];
+      if (vocabulary) argv.push('--vocabulary-file', vocabulary);
       if (!job.input.speakers) argv.push('--no-speakers');
       if (job.input.outputs?.audio) argv.push('--audio');
       if (job.input.outputs?.segments) argv.push('--segments');
@@ -289,14 +366,16 @@ export default function plugin(bb) {
     if(jobs.some(job=>['queued','preparing','starting','running','returning'].includes(job.state))){migrationPaused=false;throw new Error('Wait for active jobs before migrating');}
     migrationPaused=true;
     const entries=await Promise.all((await kv.list()).filter(key=>key.startsWith('job:')||key.startsWith('setup:')).map(async key=>({key,value:await kv.get(key)})));
-    return {version:1,settings:await settings.get(),entries};
+    const {voiceRegistryKey: _key, ...recoverableSettings} = await settings.get();
+    return {version:1,settings:recoverableSettings,entries};
   }
   async function migrationRestore(snapshot) {
     for(const entry of snapshot.entries) {
       if(!entry.key.startsWith('job:')&&!entry.key.startsWith('setup:'))throw new Error('Invalid migration key');
       await kv.set(entry.key,entry.value);
     }
-    await settings.experimental_set(snapshot.settings);migrationPaused=false;
+    const {voiceRegistryKey: _key, ...recoverableSettings} = snapshot.settings;
+    await settings.experimental_set(recoverableSettings);migrationPaused=false;
     return {restored:snapshot.entries.length};
   }
   bb.rpc.register(rpcContract, { migrationSnapshot, migrationRestore, services, submit, status, copy, cancel, retryDelivery, prepareWorkers }, {

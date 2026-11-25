@@ -18,19 +18,20 @@ def resolve_model(config):
     return str(max(paths, key=lambda p: (p.stat().st_mtime_ns, str(p))))
 
 
-def tokens(audio, chunks, config, sample_rate=16000):
+def tokens(audio, chunks, config, sample_rate=16000, vocabulary=()):
     """Возвращаем совместимые с diarize.merge токены и абсолютные таймкоды."""
     model_path = resolve_model(config)
     import transcribe_cpp
 
     pieces, timed = {}, []
     with transcribe_cpp.Model(model_path) as model:
+        options = {"vocabulary": list(vocabulary)} if vocabulary and model.supports("vocabulary") else {}
         with model.session() as session:
             for start, end in chunks:
                 if end - start < 320:
                     continue
                 pcm = np.ascontiguousarray(audio[start:end], dtype=np.float32)
-                result = session.run(pcm, timestamps="token")
+                result = session.run(pcm, timestamps="token", **options)
                 if result.text.strip() and not result.tokens:
                     raise RuntimeError("GigaAM GGUF не вернула таймкоды токенов")
                 first = True
@@ -43,6 +44,6 @@ def tokens(audio, chunks, config, sample_rate=16000):
                     # Каждый чанк декодируется независимо: сохраняем границу слов.
                     pieces[index] = (" " if first else "") + token.text
                     first = False
-                    midpoint = (token.t0_ms + token.t1_ms) / 2000.0
-                    timed.append((start / sample_rate + midpoint, index))
+                    offset = start / sample_rate
+                    timed.append((offset + token.t0_ms / 1000, index, offset + token.t1_ms / 1000))
     return pieces, -1, timed

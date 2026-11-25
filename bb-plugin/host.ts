@@ -1,11 +1,12 @@
 import { experimental_defineHostEntry } from '@get-bb/plugin-sdk/host';
 import { materializeRuntime } from './runtime.js';
 import { hostContract } from './contract.js';
+import { projectVocabulary } from './vocabulary.js';
 import { createHash } from 'node:crypto';
 import { createReadStream, constants } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { open, mkdir, stat, link, unlink, access, copyFile, readFile, writeFile, rename } from 'node:fs/promises';
-import { dirname, isAbsolute, join } from 'node:path';
+import { basename, dirname, isAbsolute, join } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 const exec = promisify(execFile);
@@ -22,6 +23,56 @@ async function info(path: string) {
 export default experimental_defineHostEntry({
   contract: hostContract,
   handlers: {
+    async voiceFeatures({ recording, segments, script, python, speaker }, context) {
+      if (basename(script) !== 'voice_features.py' || basename(recording) !== 'recording' ||
+          segments !== join(dirname(recording), 'diarization.json')) throw new Error('Unexpected review artifact path');
+      const argv = [absolute(script), absolute(recording), absolute(segments)];
+      if (speaker !== undefined) argv.push('--speaker', String(speaker));
+      const { stdout } = await exec(python === 'python3' ? python : absolute(python), argv, {
+        cwd: dirname(script), timeout: 120000, maxBuffer: 65536, signal: context.signal,
+      });
+      return JSON.parse(stdout.trim().split('\n').at(-1)!);
+    },
+    async voiceRender({ source, filename, labels }) {
+      const names = new Map(labels.map(({speaker,name}) => [speaker, name]));
+      const input = await readFile(absolute(source), 'utf8');
+      const text = input.replace(/^Speaker (\d+) (?=\[)/gm, (line, id) => {
+        const name = names.get(Number(id));
+        return name ? name + ' ' : line;
+      });
+      const target = join(dirname(source), filename);
+      await writeFile(target, text, { flag:'wx', mode:0o600 });
+      return target;
+    },
+    async voiceClip({ recording, start }, context) {
+      if (basename(recording) !== 'recording') throw new Error('Unexpected sample source path');
+      const { stdout } = await exec('ffmpeg', ['-nostdin', '-v', 'error', '-ss', String(start),
+        '-i', absolute(recording), '-t', '5', '-vn', '-ar', '16000', '-ac', '1', '-f', 's16le', 'pipe:1'],
+        { encoding: 'buffer', timeout: 45000, maxBuffer: 180000, signal: context.signal });
+      if (stdout.length !== 160000) throw new Error('No complete five-second sample');
+      const header = Buffer.alloc(44);
+      header.write('RIFF', 0);
+      header.writeUInt32LE(36 + stdout.length, 4);
+      header.write('WAVEfmt ', 8);
+      header.writeUInt32LE(16, 16);
+      header.writeUInt16LE(1, 20);
+      header.writeUInt16LE(1, 22);
+      header.writeUInt32LE(16000, 24);
+      header.writeUInt32LE(32000, 28);
+      header.writeUInt16LE(2, 32);
+      header.writeUInt16LE(16, 34);
+      header.write('data', 36);
+      header.writeUInt32LE(stdout.length, 40);
+      return Buffer.concat([header, stdout]).toString('base64');
+    },
+    async projectVocabulary({ root, excludedRoots }) {
+      return projectVocabulary(absolute(root), excludedRoots?.map(absolute));
+    },
+    async writeVocabulary({ folder, terms }) {
+      const path = join(absolute(folder), 'vocabulary.json');
+      await writeFile(path, JSON.stringify(terms), { flag: 'wx', mode: 0o600 });
+      return path;
+    },
     async runtime(_input,context) {return materializeRuntime(context.experimental_paths.dataDir);},
     async localCopy({ source, target }) {
       absolute(source); absolute(target);

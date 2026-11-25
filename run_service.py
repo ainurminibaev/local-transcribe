@@ -17,6 +17,7 @@ def main():
     ap.add_argument('--segments',action='store_true')
     ap.add_argument('--speaker-count',type=int)
     ap.add_argument('--samples',action='store_true')
+    ap.add_argument('--vocabulary-file')
     ap.add_argument('--lease-file');ap.add_argument('--lease-token')
     args=ap.parse_args()
     if args.no_speakers and (args.samples or args.speaker_count):ap.error('Speaker count/samples require diarization')
@@ -24,6 +25,7 @@ def main():
     if args.lease_file:
         from lease_guard import supervise
         command=[sys.executable,str(Path(__file__).resolve()),args.input,'--out-dir',args.out_dir,'--engine',args.engine]
+        if args.vocabulary_file:command+=['--vocabulary-file',args.vocabulary_file]
         if args.no_speakers:command.append('--no-speakers')
         if args.audio:command.append('--audio')
         if args.segments:command.append('--segments')
@@ -44,7 +46,12 @@ def main():
     if not args.no_speakers:
         command+=['--json-out',str(out/'diarization.json'),'--cache-dir',str(out)]
         if args.speaker_count:command+=['--speaker-count',str(args.speaker_count)]
-    subprocess.run(command,check=True)
+    if args.vocabulary_file:command+=['--vocabulary-file',args.vocabulary_file]
+    try:
+        subprocess.run(command,check=True)
+    finally:
+        if args.vocabulary_file and Path(args.vocabulary_file) == out/'vocabulary.json':
+            (out/'vocabulary.json').unlink(missing_ok=True)
     if args.segments or not args.no_speakers:
         artifacts['segments']=str(out/'diarization.json')
         if args.no_speakers:
@@ -61,8 +68,7 @@ def main():
     diagnostics={}
     if not args.no_speakers:
         raw=json.loads((out/'diarization.json').read_text())
-        diagnostics={key:raw.get(key) for key in ['detectedSpeakerClusters','speakerCountConstraint','warnings']}
-        diagnostics['method']='normalized-kmeans' if args.speaker_count else 'modelscope-auto'
+        diagnostics={key:raw.get(key) for key in ['detectedSpeakerClusters','speakerCountConstraint','warnings','method']}
         diagnostics['identityLabels']=False
     (out/'result.json').write_text(json.dumps({'artifacts':artifacts,'engine':args.engine,'speakerLabels':not args.no_speakers,'diagnostics':diagnostics},ensure_ascii=False,indent=2)+'\n')
     from worker_progress import progress

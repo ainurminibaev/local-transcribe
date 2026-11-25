@@ -33,7 +33,7 @@ class GigaamGgufTests(unittest.TestCase):
         results = [SimpleNamespace(text=text, tokens=[SimpleNamespace(text=text, t0_ms=100, t1_ms=300)]) for text in ["Привет", "Пока"]]
         pieces, blank, timed = self.run_mock(results)
         self.assertEqual(blank, -1)
-        self.assertEqual(timed, [(0.2, 0), (2.2, 1)])
+        self.assertEqual(timed, [(0.1, 0, 0.3), (2.1, 1, 2.3)])
         self.assertEqual("".join(pieces.values()).strip(), "Привет Пока")
         text = diarize.merge([(0, 2, 0), (2, 4, 1)], pieces, timed, 0)
         self.assertEqual(text, "Speaker 0 [00:00]: Привет\nSpeaker 1 [00:02]: Пока")

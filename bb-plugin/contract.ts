@@ -2,6 +2,14 @@ import { defineRpcContract } from '@get-bb/plugin-sdk';
 import { z } from 'zod';
 const path = z.string().min(1).max(16384);
 export const hostContract = defineRpcContract({
+  voiceFeatures: { input: z.object({ recording: path, segments: path, script: path, python: path, speaker: z.number().int().min(0).max(255).optional() }), output: z.any() },
+  voiceRender: { input: z.object({
+    source: path, filename: z.string().regex(/^voice-labels-[a-f0-9-]+\.txt$/u),
+    labels: z.array(z.object({speaker: z.number().int().nonnegative(), name: z.string().min(1).max(96)})).max(256),
+  }), output: path },
+  voiceClip: { input: z.object({ recording: path, start: z.number().nonnegative() }), output: z.string() },
+  projectVocabulary: { input: z.object({ root: path, excludedRoots: z.array(path).default([]) }), output: z.array(z.string()) },
+  writeVocabulary: { input: z.object({ folder: path, terms: z.array(z.string().max(64)).max(64) }), output: path },
   runtime: { input: z.object({}).strict(), output: z.any(), experimental_retryable: true },
   localCopy: { input: z.object({ source: path, target: path }), output: z.any() },
   lease: { input: z.object({ path, token: z.string().uuid(), expiresAt: z.number(), create: z.boolean() }), output: z.boolean() },

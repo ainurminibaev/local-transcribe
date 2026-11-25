@@ -4,10 +4,10 @@ import argparse,base64,hashlib,json
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
 FILES=['config.json','requirements.txt','requirements-cpu-py312.lock','models-manifest.json',
-       'diarize.py','diarize_ms.py','transcribe.py','gigaam_gguf.py','probe_service.py',
+       'diarize.py','diarize_ms.py','transcribe.py','gigaam_gguf.py','gigaam_config.py','probe_service.py',
        'skills/video-downloader/scripts/download_video.py','templates/md2pdf.sh','templates/normalize_md.py','templates/итоги.css',
        'run_service.py','lease_guard.py','model_cache.py','download_modelscope.py',
-       'diarization_cache.py','export_speaker_samples.py','worker_progress.py','scripts/setup_worker.py']
+       'diarization_cache.py','fluidaudio_diarization.py','ctc_context.py','export_speaker_samples.py','worker_progress.py','voice_features.py','scripts/setup_worker.py']
 def generate():
     version=json.loads((ROOT/'bb-plugin/package.json').read_text())['version']
     files={name:base64.b64encode((ROOT/name).read_bytes()).decode() for name in FILES}

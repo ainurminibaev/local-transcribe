@@ -1,6 +1,6 @@
 {
   "name": "bb-plugin-local-transcribe",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "private": true,
   "type": "module",
   "bb": {
@@ -10,6 +10,7 @@
       "icon": "Mic"
     },
     "server": "./bb-plugin/server.ts",
+    "app": "./bb-plugin/app.tsx",
     "skills": [
       "bb-plugin/skills"
     ],

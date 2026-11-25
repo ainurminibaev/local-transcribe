@@ -12,11 +12,15 @@
 Использование:
   python3 diarize.py <audio> [--out transcript.txt] [--speakers N] [--threshold 0.5]
 """
-import sys, os, json, subprocess, tempfile, argparse
+import sys, os, subprocess, tempfile, argparse
+import re
+
 import numpy as np
 
+from gigaam_config import load_config
+
 HERE = os.path.dirname(os.path.abspath(__file__))
-CFG = json.load(open(os.path.join(HERE, "config.json"), encoding="utf-8"))
+CFG = load_config(HERE)
 GIGAAM_MODEL = os.path.expanduser(CFG["gigaam"]["model"])
 GIGAAM_VOCAB = os.path.expanduser(CFG["gigaam"]["vocab"])
 SEG = os.path.join(HERE, "diar_models/sherpa-onnx-pyannote-segmentation-3-0/model.int8.onnx")
@@ -81,12 +85,12 @@ def _split_points(y):
     return segs
 
 
-def gigaam_tokens(y):
-    """Возвращает (id2tok, BLANK, [(time_sec, token_id), ...]) по всему аудио."""
+def gigaam_tokens(y, vocabulary=()):
+    """Возвращает (id2tok, BLANK, [(start_sec, token_id, end_sec), ...]) по всему аудио."""
     backend = CFG["gigaam"].get("backend", "onnx")
     if backend == "gguf":
         from gigaam_gguf import tokens
-        return tokens(y, _split_points(y), CFG["gigaam"], SR)
+        return tokens(y, _split_points(y), CFG["gigaam"], SR, vocabulary)
     if backend != "onnx":
         raise ValueError(f"Неизвестный backend GigaAM: {backend}")
     import onnxruntime as ort
@@ -95,6 +99,8 @@ def gigaam_tokens(y):
         if not line.strip(): continue
         *tok, idx = line.rsplit(" ", 1); id2tok[int(idx)] = tok[0]
     BLANK = 256
+    chunk_boundary = -1
+    id2tok[chunk_boundary] = " "
     sess = ort.InferenceSession(GIGAAM_MODEL, providers=["CPUExecutionProvider"])
     toks = []
     for (a, b) in _split_points(y):
@@ -106,11 +112,21 @@ def gigaam_tokens(y):
         T = logp.shape[0]
         dur = (b - a) / SR
         t0 = a / SR
-        ids = logp.argmax(-1); prev = -1
+        if vocabulary:
+            from ctc_context import frame_ids
+            ids = frame_ids(logp, id2tok, BLANK, vocabulary)
+        else:
+            ids = logp.argmax(-1)
+        if toks:
+            toks.append((t0, chunk_boundary, t0))
+        prev = -1
         for fi, i in enumerate(ids):
             i = int(i)
             if i != prev and i != BLANK:
-                toks.append((t0 + (fi + 0.5) * dur / T, i))
+                toks.append((t0 + fi * dur / T, i, t0 + (fi + 1) * dur / T))
+            elif i != BLANK:
+                start, token_id, _ = toks[-1]
+                toks[-1] = (start, token_id, t0 + (fi + 1) * dur / T)
             prev = i
     return id2tok, BLANK, toks
 
@@ -134,77 +150,91 @@ def diarize(y, num_speakers, threshold, emb):
 
 def mmss(t): return f"{int(t)//60:02d}:{int(t)%60:02d}"
 
-def _merge_adjacent(segs):
-    out = []
-    for (a, b, s) in segs:
-        if out and out[-1][2] == s and a - out[-1][1] <= 1.0:
-            out[-1] = (out[-1][0], b, s)
-        else:
-            out.append((a, b, s))
-    return out
-
-def smooth_segments(segs, min_turn):
-    """Убирает короткие «острова» спикеров: сегмент < min_turn поглощается более
-    длинным соседом. Повторяем, пока есть что сглаживать."""
-    segs = _merge_adjacent(sorted(segs, key=lambda x: x[0]))
-    for _ in range(50):  # потолок итераций — защита от зацикливания
-        changed = False
-        for i, (a, b, s) in enumerate(segs):
-            if b - a >= min_turn:
+def timed_words(pieces, tokens):
+    """Assemble whole words before inspecting speaker boundaries."""
+    parts = []
+    start = end = 0.0
+    for token in tokens:
+        first, index = token[:2]
+        last = token[2] if len(token) == 3 else first
+        piece = pieces.get(index, "").replace("▁", " ")
+        for chunk in re.findall(r"\s+|\S+", piece):
+            if chunk.isspace():
+                if parts:
+                    yield start, end, "".join(parts)
+                    parts = []
                 continue
-            neigh = [x for x in (segs[i-1] if i > 0 else None,
-                                 segs[i+1] if i < len(segs)-1 else None) if x]
-            if not neigh:
-                continue
-            cand = max(neigh, key=lambda x: x[1] - x[0])
-            if cand[2] != s:                       # помечаем только при реальной смене
-                segs[i] = (a, b, cand[2]); changed = True
-        segs = _merge_adjacent(segs)
-        if not changed or len(segs) <= 1:
-            break
-    return segs
+            if not parts:
+                start, end = first, last
+            parts.append(chunk)
+            end = max(end, last)
+    if parts:
+        yield start, end, "".join(parts)
 
-import re as _re
-def _is_substantive(txt):
-    """Реплика «настоящая», а не островок из пунктуации/одного слова."""
-    letters = _re.sub(r"[^\w]", "", txt)
-    return len(letters) >= 4
 
-def merge(segments, id2tok, toks, min_turn):
-    segments = smooth_segments(segments, min_turn)
-    def spk_at(t):
-        for (a, b, s) in segments:
-            if a <= t <= b: return s
-        return min(segments, key=lambda x: abs((x[0]+x[1])/2 - t))[2] if segments else 0
-    # 1) собираем сырые блоки (спикер, старт, текст) по сменам спикера
-    blocks, cur_spk, cur_ids, cur_start = [], None, [], 0.0
-    def flush():
-        if cur_ids:
-            txt = "".join(id2tok.get(i, "") for i in cur_ids).replace("▁", " ").strip()
-            if txt: blocks.append([cur_spk, cur_start, txt])
-    for (t, i) in toks:
-        s = spk_at(t)
-        if s != cur_spk:
-            flush(); cur_spk, cur_ids, cur_start = s, [], t
-        cur_ids.append(i)
-    flush()
-    # 2) приклеиваем несущественные островки (пунктуация/1 слово) к соседней реплике
-    out = []
-    for blk in blocks:
-        if out and not _is_substantive(blk[2]):
-            out[-1][2] = (out[-1][2] + " " + blk[2]).strip()
-        elif out and out[-1][0] == blk[0]:
-            out[-1][2] = (out[-1][2] + " " + blk[2]).strip()
+def word_turns(segments, words):
+    """Use a speaker label only if exactly one voice intersects the word."""
+    pending = iter(sorted(segments))
+    upcoming = next(pending, None)
+    active = []
+    turns = []
+    for start, end, word in words:
+        active = [span for span in active if span[1] > start]
+        while upcoming and (upcoming[0] < end or upcoming[0] <= start):
+            if upcoming[1] > start:
+                active.append(upcoming)
+            upcoming = next(pending, None)
+        voices = {speaker for left, _, speaker in active if left <= start or left < end}
+        speaker = next(iter(voices)) if len(voices) == 1 else None
+        if turns and turns[-1]["speaker"] == speaker and start - turns[-1]["end"] < 0.8:
+            turns[-1]["text"] += " " + word
+            turns[-1]["end"] = max(end, turns[-1]["end"])
         else:
-            out.append(blk)
-    # 3) повторно сливаем подряд идущих одинаковых спикеров после чистки
-    merged = []
-    for spk, st, txt in out:
-        if merged and merged[-1][0] == spk:
-            merged[-1][2] = (merged[-1][2] + " " + txt).strip()
-        else:
-            merged.append([spk, st, txt])
-    return "\n".join(f"Speaker {spk} [{mmss(st)}]: {txt}" for spk, st, txt in merged)
+            turns.append({"speaker": speaker, "start": start, "end": end, "text": word})
+    return turns
+
+
+def transcript_gaps(words, speech, duration):
+    """Flag gaps of 3 s, or gaps with at least 0.8 s of detected speech."""
+    speech = sorted(speech)
+    cursor = 0.0
+    speech_index = 0
+    gaps = []
+    for start, end in [(a, b) for a, b, word in words if any(char.isalnum() for char in word)] + [(duration, duration)]:
+        start = min(start, duration)
+        if start > cursor:
+            while speech_index < len(speech) and speech[speech_index][1] <= cursor:
+                speech_index += 1
+            has_speech = False
+            for index in range(speech_index, len(speech)):
+                left, right, _ = speech[index]
+                if left >= start:
+                    break
+                if min(start, right) - max(cursor, left) >= 0.8:
+                    has_speech = True
+                    break
+            if has_speech or start - cursor >= 3:
+                gaps.append({"start": cursor, "end": start, "speechDetected": has_speech})
+        cursor = max(cursor, end)
+    return gaps
+
+
+def render_transcript(turns, gaps=()):
+    entries = []
+    for turn in turns:
+        speaker = turn["speaker"]
+        label = f"Speaker {speaker}" if speaker is not None else "Говорящий неясен"
+        entries.append((turn["start"], f'{label} [{mmss(turn["start"])}]: {turn["text"]}'))
+    for gap in gaps:
+        times = f'{mmss(gap["start"])}–{mmss(gap["end"])}'
+        label = "речь обнаружена" if gap["speechDetected"] else "речь не подтверждена"
+        entries.append((gap["start"], f"[{times}] Нет распознанного текста ({label})"))
+    return "\n".join(line for _, line in sorted(entries, key=lambda item: item[0]))
+
+
+def merge(segments, id2tok, toks, min_turn=0):
+    # Retain the legacy argument for callers, but never reassign short turns.
+    return render_transcript(word_turns(segments, timed_words(id2tok, toks)))
 
 
 def main():
@@ -215,8 +245,7 @@ def main():
     ap.add_argument("--threshold", type=float, default=0.6, help="порог кластеризации (для авто)")
     ap.add_argument("--emb", default="eres2net_base", choices=list(EMB_CHOICES),
                     help="модель эмбеддингов спикеров")
-    ap.add_argument("--min-turn", type=float, default=2.0,
-                    help="мин. длительность реплики спикера (сек) — короче поглощается соседом")
+    ap.add_argument("--min-turn", type=float, help=argparse.SUPPRESS)
     args = ap.parse_args()
     emb = os.path.join(HERE, EMB_CHOICES[args.emb])
 

@@ -7,9 +7,11 @@ from pathlib import Path
 import platform
 import shutil
 
+from gigaam_config import load_config
+
 
 def probe():
-    config = json.loads((Path(__file__).parent / 'config.json').read_text())
+    config = load_config(Path(__file__).parent)
     missing = [name for name in ['numpy', 'soundfile', 'librosa', 'torch', 'torchaudio', 'modelscope', 'funasr', 'simplejson', 'sortedcontainers']
                if importlib.util.find_spec(name) is None]
     backend = config['gigaam'].get('backend', 'onnx')
@@ -20,6 +22,7 @@ def probe():
         models = glob.glob(str(Path(config['gigaam']['gguf_model']).expanduser()))
     else:
         models = [str(Path(config['gigaam']['model']).expanduser())]
+        if not Path(config['gigaam']['vocab']).expanduser().is_file(): missing.append('GigaAM vocabulary')
     if not any(Path(m).is_file() for m in models): missing.append('GigaAM model')
     if not shutil.which('ffmpeg'): missing.append('ffmpeg')
     try:
@@ -39,7 +42,7 @@ def probe():
             missing.append('torch import: ' + str(exc))
     return {'engineProtocol': 2, 'ready': not missing, 'device': device, 'platform': platform.system(),
             'inputs': ['ffmpeg-audio', 'ffmpeg-video'], 'outputs': ['transcript', 'segments', 'audio', 'source', 'samples'], 'supportsSpeakerCount': True,
-            'modelsCached': models_cached, 'engine': 'gigaam-' + backend, 'speakers': True, 'missing': missing,
+            'contextVocabulary': backend == 'onnx' and not missing, 'modelsCached': models_cached, 'engine': 'gigaam-' + backend, 'speakers': True, 'missing': missing,
             'asrDevice': 'metal' if platform.system() == 'Darwin' and platform.machine() == 'arm64' and backend == 'gguf' else device,
             'pdfReady': bool(shutil.which('pandoc') and shutil.which('weasyprint'))}
 

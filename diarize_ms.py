@@ -10,12 +10,12 @@ Handy не трогаем. HuggingFace-токен не нужен.
 
   python3 diarize_ms.py <audio> [--out transcript.txt]
 """
-import sys, os, time, argparse, json, re
+import sys, os, time, argparse, json, subprocess
 os.environ.setdefault("MODELSCOPE_LOG_LEVEL", "40")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-import diarize as D  # переиспользуем GigaAM (gigaam_tokens, to_wav, _merge_adjacent, mmss)
+import diarize as D
 
 
 def diarize_ms(wav, audio, speaker_count=None, cache_dir=None):
@@ -40,6 +40,20 @@ def diarize_ms(wav, audio, speaker_count=None, cache_dir=None):
     return [(float(a), float(b), int(s)) for a,b,s in result]
 
 
+def speaker_segments(wav, audio, speaker_count=None, cache_dir=None):
+    helper = os.getenv("LOCAL_TRANSCRIBE_FLUIDAUDIO")
+    warnings = []
+    if helper:
+        from fluidaudio_diarization import diarize
+        try:
+            return diarize(helper, wav, len(audio) / D.SR, speaker_count), "fluidaudio-offline", warnings
+        except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError) as error:
+            sys.stderr.write(f"[diarize_ms] FluidAudio failed, using ModelScope: {error}\n")
+            warnings.append("FluidAudio failed; used ModelScope")
+    method = "normalized-kmeans" if speaker_count else "modelscope-auto"
+    return diarize_ms(wav, audio, speaker_count, cache_dir), method, warnings
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("audio")
@@ -47,6 +61,7 @@ def main():
     ap.add_argument("--json-out", default=None)
     ap.add_argument("--speaker-count",type=int)
     ap.add_argument("--cache-dir")
+    ap.add_argument("--vocabulary-file")
     args = ap.parse_args()
     if args.speaker_count is not None and not 1<=args.speaker_count<=32:ap.error("speaker-count must be between 1 and 32")
 
@@ -55,49 +70,50 @@ def main():
         import soundfile as sf
         y, _ = sf.read(wav, dtype="float32")
         if y.ndim > 1: y = y.mean(axis=1)
-        sys.stderr.write("[diarize_ms] диаризация (ModelScope)...\n")
+        sys.stderr.write("[diarize_ms] диаризация...\n")
         from worker_progress import progress
         progress(args.cache_dir,'diarization',duration=len(y)/D.SR)
         t0 = time.time()
-        segs = D._merge_adjacent(sorted(diarize_ms(wav,y,args.speaker_count,args.cache_dir), key=lambda x: x[0]))
-        sys.stderr.write(f"[diarize_ms] спикеров: {len(set(s for *_, s in segs))}, "
+        segs, method, warnings = speaker_segments(wav, y, args.speaker_count, args.cache_dir)
+        segs.sort()
+        sys.stderr.write(f"[diarize_ms] {method}, спикеров: {len(set(s for *_, s in segs))}, "
                          f"сегментов: {len(segs)}, {round(time.time()-t0,1)} с\n")
         progress(args.cache_dir,'asr',detectedSpeakerClusters=len({speaker for _,_,speaker in segs}))
         sys.stderr.write(f"[diarize_ms] распознавание GigaAM ({D.CFG['gigaam'].get('backend', 'onnx')})...\n")
         from pathlib import Path
         from diarization_cache import audio_fingerprint
-        cache=Path(args.cache_dir)/'asr-tokens.json' if args.cache_dir else None
+        vocabulary = json.loads(Path(args.vocabulary_file).read_text()) if args.vocabulary_file else []
+        cache=Path(args.cache_dir)/'asr-tokens-v2.json' if args.cache_dir else None
         fingerprint=audio_fingerprint(y)
+        import hashlib
+        vocabulary_digest = hashlib.sha256(json.dumps(vocabulary, ensure_ascii=False).encode()).hexdigest()
         if cache and cache.is_file():
             data=json.loads(cache.read_text())
-            if data['audioSha256']!=fingerprint or data['config']!=D.CFG['gigaam']:
+            if (data['audioSha256'], data['config'], data.get('vocabularySha256')) != (fingerprint, D.CFG['gigaam'], vocabulary_digest):
                 raise ValueError('ASR cache does not match this recording/configuration')
             id2tok={int(k):v for k,v in data['pieces'].items()};toks=data['tokens']
             sys.stderr.write('[diarize_ms] reuse cached ASR tokens\n')
         else:
-            id2tok, _, toks = D.gigaam_tokens(y)
+            id2tok, _, toks = D.gigaam_tokens(y, vocabulary)
             if cache:
                 cache.parent.mkdir(parents=True,exist_ok=True)
                 temporary=cache.with_suffix('.json.part')
-                temporary.write_text(json.dumps({'audioSha256':fingerprint,'config':D.CFG['gigaam'],'pieces':id2tok,'tokens':toks},ensure_ascii=False,default=lambda value:value.item()))
+                temporary.write_text(json.dumps({'audioSha256':fingerprint,'vocabularySha256':vocabulary_digest,'config':D.CFG['gigaam'],'pieces':id2tok,'tokens':toks},ensure_ascii=False,default=lambda value:value.item()))
                 temporary.replace(cache)
-        text = D.merge(segs, id2tok, toks, min_turn=0.35 if args.speaker_count else 1.5)  # сглаживаем короткие островки
-        nspk = len(set(int(l.split()[1]) for l in text.splitlines() if l.startswith("Speaker")))
+        words = list(D.timed_words(id2tok, toks))
+        turns = D.word_turns(segs, words)
+        gaps = D.transcript_gaps(words, segs, len(y) / D.SR)
+        text = D.render_transcript(turns, gaps)
+        nspk = len({turn["speaker"] for turn in turns if turn["speaker"] is not None})
     finally:
         os.remove(wav)
 
     if args.json_out:
-        turns=[]
-        for line in text.splitlines():
-            match=re.match(r"Speaker (\d+) \[(\d+):(\d+)\]: (.*)",line)
-            if match:
-                speaker,minutes,seconds,words=match.groups()
-                turns.append({'speaker':int(speaker),'start':int(minutes)*60+int(seconds),'text':words})
         payload={'duration':len(y)/D.SR,'detectedSpeakerClusters':len({speaker for _,_,speaker in segs}),'speakerCountConstraint':args.speaker_count,'identityLabels':False,'speakerLabels':True,'text':text,
                  'speakerSegments':[{'start':float(start),'end':float(end),'speaker':int(speaker)} for start,end,speaker in segs],
-                 'turns':turns,'warnings':[] }
+                 'turns':turns,'transcriptGaps':gaps,'method':method,'warnings':warnings }
         if args.speaker_count and payload['detectedSpeakerClusters']!=args.speaker_count:
-            payload['warnings'].append('Some constrained speaker clusters were lost during temporal smoothing; review samples before assigning identities')
+            payload['warnings'].append('Detected speaker count differs from the constraint; review samples before assigning identities')
         with open(args.json_out,'w',encoding='utf-8') as out:
             json.dump(payload,out,ensure_ascii=False,indent=2);out.write('\n')
 
